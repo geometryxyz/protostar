@@ -321,6 +321,7 @@ where
                 let mut witness = WitnessCollection {
                     k: params.k(),
                     current_phase,
+                    // Seems inefficient to recreate all this data
                     advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
                     instances,
                     challenges: &challenges,

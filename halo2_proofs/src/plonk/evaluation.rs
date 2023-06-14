@@ -180,6 +180,7 @@ impl Calculation {
 }
 
 /// Evaluator
+/// Probably want a Homogenized Evaluator
 #[derive(Clone, Default, Debug)]
 pub struct Evaluator<C: CurveAffine> {
     ///  Custom gates evalution
@@ -224,11 +225,13 @@ impl<C: CurveAffine> Evaluator<C> {
     pub fn new(cs: &ConstraintSystem<C::ScalarExt>) -> Self {
         let mut ev = Evaluator::default();
 
+        // good place to homoegenize?
+
         // Custom gates
         let mut parts = Vec::new();
         for gate in cs.gates.iter() {
             parts.extend(
-                gate.polynomials()
+                gate.polynomials() // expressions
                     .iter()
                     .map(|poly| ev.custom_gates.add_expression(poly)),
             );
@@ -568,12 +571,15 @@ impl<C: CurveAffine> GraphEvaluator<C> {
     /// resulting value so the result can be reused  when that calculation
     /// is done multiple times.
     fn add_calculation(&mut self, calculation: Calculation) -> ValueSource {
+        // attempt to find this calculation in the set of existing calculation
         let existing_calculation = self
             .calculations
             .iter()
             .find(|c| c.calculation == calculation);
         match existing_calculation {
+            // if it exists, then reuse it
             Some(existing_calculation) => ValueSource::Intermediate(existing_calculation.target),
+            // else create a new calculation
             None => {
                 let target = self.num_intermediates;
                 self.calculations.push(CalculationInfo {
@@ -599,6 +605,8 @@ impl<C: CurveAffine> GraphEvaluator<C> {
                 )))
             }
             Expression::Advice(query) => {
+                // our calc depends on this specific query.
+                // e.g. w[1][i+1]
                 let rot_idx = self.add_rotation(&query.rotation);
                 self.add_calculation(Calculation::Store(ValueSource::Advice(
                     query.column_index,

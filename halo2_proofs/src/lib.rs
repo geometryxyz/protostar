@@ -27,6 +27,7 @@
 
 pub mod arithmetic;
 pub mod circuit;
+mod protostar;
 pub use halo2curves;
 mod multicore;
 pub mod plonk;

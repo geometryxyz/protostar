@@ -1500,7 +1500,7 @@ pub struct Gate<F: Field> {
     /// We track queried selectors separately from other cells, so that we can use them to
     /// trigger debug checks on gates.
     queried_selectors: Vec<Selector>,
-    queried_cells: Vec<VirtualCell>,
+    queried_cells: Vec<VirtualCell>, // w_1 at i+1, w_2 at i, q_1 at i
 }
 
 impl<F: Field> Gate<F> {
@@ -1709,10 +1709,14 @@ impl<F: Field> ConstraintSystem<F> {
         name: S,
         table_map: impl FnOnce(&mut VirtualCells<'_, F>) -> Vec<(Expression<F>, TableColumn)>,
     ) -> usize {
+        // `cells` is named `meta` in `table_map`. We give it to the closure so that
+        // we get information about which columns are queried.
+        // Essentially extracts all the variables from `Expression`
         let mut cells = VirtualCells::new(self);
         let table_map = table_map(&mut cells)
             .into_iter()
             .map(|(mut input, table)| {
+                // why is table not used.
                 if input.contains_simple_selector() {
                     panic!("expression containing simple selector supplied to lookup argument");
                 }
@@ -1920,6 +1924,7 @@ impl<F: Field> ConstraintSystem<F> {
         // expressions in gates, as lookup arguments cannot support simple
         // selectors. Selectors that are complex or do not appear in any gates
         // will have degree zero.
+        // For each polynomial in each gate, get the unique simple selector
         let mut degrees = vec![0; selectors.len()];
         for expr in self.gates.iter().flat_map(|gate| gate.polys.iter()) {
             if let Some(selector) = expr.extract_simple_selector() {

@@ -434,6 +434,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> TableLayouter<F>
         offset: usize,
         to: &'v mut (dyn FnMut() -> Value<Assigned<F>> + 'v),
     ) -> Result<(), Error> {
+        // Cannot use the same column for different lookups ?
         if self.used_columns.contains(&column) {
             return Err(Error::Synthesis); // TODO better error
         }
