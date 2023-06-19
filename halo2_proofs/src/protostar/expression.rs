@@ -6,6 +6,7 @@ use crate::plonk::{
 
 /// Low-degree expression representing an identity that must hold over the committed columns.
 pub enum Expr<F> {
+    /// This is a slack variable whose purpose is to make the equation homogeneous.
     Slack(usize),
     /// This is a constant polynomial
     Constant(F),
@@ -17,7 +18,8 @@ pub enum Expr<F> {
     Advice(AdviceQuery),
     /// This is an instance (external) column queried at a certain relative location
     Instance(InstanceQuery),
-    /// This is a challenge, where the second parameter represents the power of a Challenge
+    /// This is a challenge, where the second parameter represents the power of a Challenge.
+    /// Two challenges with different powers are treated as separate variables.
     Challenge(Challenge, usize),
     /// This is a negated polynomial
     Negated(Box<Expr<F>>),
@@ -52,13 +54,14 @@ impl<F: Field> From<Expression<F>> for Expr<F> {
 
 impl<F: Field> Expr<F> {
     fn flatten_challenges(self, challenges: &[Challenge]) -> Self {
-        //
+        // for each challenge, flatten the tree and turn products of the challenge
+        // with powers of the challenge
         challenges
             .iter()
             .fold(self, |acc, c| acc.distribute_challenge(c, 0))
     }
 
-    // Multiply self by challenge^power,
+    /// Multiply self by challenge^power, merge multiplications of challenges into powers of it
     fn distribute_challenge(self, challenge: &Challenge, power: usize) -> Expr<F> {
         match self {
             Expr::Negated(e) => Expr::Negated(e.distribute_challenge(challenge, power).into()),
@@ -114,6 +117,7 @@ impl<F: Field> Expr<F> {
         }
     }
 
+    // Compute the degree where powers of challenges count as 1
     fn degree(&self) -> usize {
         match self {
             Expr::Slack(d) => *d,
@@ -122,7 +126,7 @@ impl<F: Field> Expr<F> {
             Expr::Fixed(_) => 0,
             Expr::Advice(_) => 1,
             Expr::Instance(_) => 1,
-            Expr::Challenge(_, d) => 1,
+            Expr::Challenge(_, _) => 1,
             Expr::Negated(e) => e.degree(),
             Expr::Sum(e1, e2) => std::cmp::max(e1.degree(), e2.degree()),
             Expr::Product(e1, e2) => e1.degree() + e2.degree(),
@@ -130,6 +134,8 @@ impl<F: Field> Expr<F> {
         }
     }
 
+    // Homogenizes self using powers of Expr::Slack, also returning the new degree.
+    // Assumes that the expression has not been homogenized yet
     fn homogenize(self) -> (Expr<F>, usize) {
         match self {
             Expr::Slack(_) => panic!("Should not contain existing slack variable"),
@@ -170,6 +176,8 @@ impl<F: Field> Expr<F> {
             }
         }
     }
+
+    /// If self is homogeneous, return the degree, else None
     fn homogeneous_degree(&self) -> Option<usize> {
         match self {
             Expr::Negated(e) => e.homogeneous_degree(),
@@ -196,6 +204,7 @@ impl<F: Field> Expr<F> {
         }
     }
 
+    /// Evaluate the expression using closures for each node types.
     pub fn evaluate<T>(
         &self,
         slack: &impl Fn(usize) -> T,
