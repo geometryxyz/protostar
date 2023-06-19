@@ -34,6 +34,7 @@ pub use halo2curves;
 mod multicore;
 pub mod plonk;
 pub mod poly;
+pub mod protostar;
 pub mod transcript;
 
 pub mod dev;
