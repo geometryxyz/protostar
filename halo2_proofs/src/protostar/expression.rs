@@ -11,6 +11,7 @@ pub enum Expr<F> {
     /// This is a constant polynomial
     Constant(F),
     /// This is a virtual selector
+    // TODO(@adr1anh): replace with Selector(Box<Expr<F>>, Selector),
     Selector(Selector),
     /// This is a fixed column queried at a certain relative location
     Fixed(FixedQuery),
@@ -31,7 +32,7 @@ pub enum Expr<F> {
     Scaled(Box<Expr<F>>, F),
 }
 
-impl<F: Field> From<Expression<F>> for Expr<F> {
+impl<F> From<Expression<F>> for Expr<F> {
     fn from(e: Expression<F>) -> Expr<F> {
         match e {
             Expression::Constant(v) => Expr::Constant(v),
@@ -52,7 +53,7 @@ impl<F: Field> From<Expression<F>> for Expr<F> {
     }
 }
 
-impl<F: Field> Expr<F> {
+impl<F> Expr<F> {
     fn flatten_challenges(self, challenges: &[Challenge]) -> Self {
         // for each challenge, flatten the tree and turn products of the challenge
         // with powers of the challenge
@@ -218,7 +219,10 @@ impl<F: Field> Expr<F> {
         sum: &impl Fn(T, T) -> T,
         product: &impl Fn(T, T) -> T,
         scaled: &impl Fn(T, F) -> T,
-    ) -> T {
+    ) -> T
+    where
+        F: Copy,
+    {
         match self {
             Expr::Slack(d) => slack(*d),
             Expr::Constant(scalar) => constant(*scalar),

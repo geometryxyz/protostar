@@ -70,6 +70,22 @@ pub struct Polynomial<F, B> {
     _marker: PhantomData<B>,
 }
 
+pub(crate) fn empty_lagrange<F: Default + Clone>(size: usize) -> Polynomial<F, LagrangeCoeff> {
+    Polynomial {
+        values: vec![F::default(); size],
+        _marker: PhantomData,
+    }
+}
+
+pub(crate) fn empty_lagrange_assigned<F: ff::Field>(
+    size: usize,
+) -> Polynomial<Assigned<F>, LagrangeCoeff> {
+    Polynomial {
+        values: vec![F::ZERO.into(); size],
+        _marker: PhantomData,
+    }
+}
+
 impl<F, B> Index<usize> for Polynomial<F, B> {
     type Output = F;
 

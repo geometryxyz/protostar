@@ -6,12 +6,13 @@ use crate::{
         Advice, Any, Assigned, Assignment, Challenge, Circuit, Column, ConstraintSystem, Error,
         FirstPhase, Fixed, FloorPlanner, Instance, ProvingKey, Selector, VerifyingKey,
     },
-    poly::batch_invert_assigned,
     poly::{
         self,
         commitment::{Blind, CommitmentScheme, Params, Prover},
-        Basis, Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, ProverQuery,
+        empty_lagrange_assigned, Basis, Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial,
+        ProverQuery,
     },
+    poly::{batch_invert_assigned, empty_lagrange},
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ff::{Field, FromUniformBytes, PrimeField, WithSmallOrderMulGroup};
@@ -186,7 +187,7 @@ pub fn create_gate_transcript<
 >(
     params: &'params Scheme::ParamsProver,
     vk: &VerifyingKey<Scheme::Curve>,
-    circuit: ConcreteCircuit,
+    circuit: &ConcreteCircuit,
     // raw instance columns
     instances: &[&[Scheme::Scalar]],
     mut rng: R,
@@ -199,6 +200,7 @@ where
         return Err(Error::InvalidInstances);
     }
 
+    let n = params.n() as usize;
     let domain = vk.get_domain();
 
     // Hash verification key into transcript
@@ -221,7 +223,7 @@ where
     let instance_polys = instances
         .iter()
         .map(|values| {
-            let mut poly = domain.empty_lagrange();
+            let mut poly = empty_lagrange(n);
 
             if values.len() > (poly.len() - (meta.blinding_factors() + 1)) {
                 return Err(Error::InstanceTooLarge);
@@ -259,8 +261,8 @@ where
 
     // Synthesize the circuit over multiple iterations
     let (advice_polys, advice_blinds, challenges) = {
-        let mut advice_assigned = vec![domain.empty_lagrange_assigned(); meta.num_advice_columns];
-        let mut advice_polys = vec![domain.empty_lagrange(); meta.num_advice_columns];
+        let mut advice_assigned = vec![empty_lagrange_assigned(n); meta.num_advice_columns];
+        let mut advice_polys = vec![empty_lagrange(n); meta.num_advice_columns];
         let mut advice_blinds = vec![Blind::default(); meta.num_advice_columns];
         let mut challenges = HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
 
@@ -300,7 +302,7 @@ where
             // Synthesize the circuit to obtain the witness and other information.
             ConcreteCircuit::FloorPlanner::synthesize(
                 &mut witness,
-                &circuit,
+                circuit,
                 config.clone(),
                 meta.constants.clone(),
             )?;
@@ -379,4 +381,49 @@ where
         advice_blinds,
         challenges,
     })
+}
+
+#[cfg(test)]
+
+mod tests {
+    use crate::{
+        plonk::keygen_vk,
+        poly::{
+            commitment::ParamsProver,
+            ipa::{commitment::IPACommitmentScheme, multiopen::ProverIPA},
+        },
+        protostar::shuffle::MyCircuit,
+        transcript::{Blake2bWrite, Challenge255, TranscriptWriterBuffer},
+    };
+    use core::num;
+
+    use crate::plonk::{sealed::Phase, ConstraintSystem, FirstPhase};
+    use crate::{halo2curves::pasta::pallas, plonk::sealed::SealedPhase};
+
+    use super::*;
+    use crate::plonk::sealed;
+    use crate::plonk::Expression;
+    use rand_core::{OsRng, RngCore};
+
+    #[test]
+    fn test_expression_conversion() {
+        let mut rng = OsRng;
+        const W: usize = 4;
+        const H: usize = 32;
+        const K: u32 = 8;
+        let circuit = MyCircuit::<_, W, H>::rand(&mut rng);
+
+        let params = poly::ipa::commitment::ParamsIPA::<_>::new(K);
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        let vk = keygen_vk(&params, &circuit).unwrap();
+        let data = create_gate_transcript::<
+            IPACommitmentScheme<pallas::Affine>,
+            ProverIPA<pallas::Affine>,
+            _,
+            _,
+            _,
+            _,
+        >(&params, &vk, &circuit, &[], rng, &mut transcript);
+        assert!(data.is_ok());
+    }
 }
