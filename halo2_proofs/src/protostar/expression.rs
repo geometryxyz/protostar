@@ -5,6 +5,7 @@ use crate::plonk::{
 };
 
 /// Low-degree expression representing an identity that must hold over the committed columns.
+/// #[derive(Clone)]
 pub enum Expr<F> {
     /// This is a slack variable whose purpose is to make the equation homogeneous.
     Slack(usize),
@@ -32,7 +33,7 @@ pub enum Expr<F> {
     Scaled(Box<Expr<F>>, F),
 }
 
-impl<F> From<Expression<F>> for Expr<F> {
+impl<F: Field> From<Expression<F>> for Expr<F> {
     fn from(e: Expression<F>) -> Expr<F> {
         match e {
             Expression::Constant(v) => Expr::Constant(v),
@@ -53,7 +54,7 @@ impl<F> From<Expression<F>> for Expr<F> {
     }
 }
 
-impl<F> Expr<F> {
+impl<F: Field> Expr<F> {
     fn flatten_challenges(self, challenges: &[Challenge]) -> Self {
         // for each challenge, flatten the tree and turn products of the challenge
         // with powers of the challenge
@@ -63,7 +64,7 @@ impl<F> Expr<F> {
     }
 
     /// Multiply self by challenge^power, merge multiplications of challenges into powers of it
-    fn distribute_challenge(self, challenge: &Challenge, power: usize) -> Expr<F> {
+    pub fn distribute_challenge(self, challenge: &Challenge, power: usize) -> Expr<F> {
         match self {
             Expr::Negated(e) => Expr::Negated(e.distribute_challenge(challenge, power).into()),
             Expr::Scaled(v, f) => Expr::Scaled(v.distribute_challenge(challenge, power).into(), f),
@@ -137,7 +138,7 @@ impl<F> Expr<F> {
 
     // Homogenizes self using powers of Expr::Slack, also returning the new degree.
     // Assumes that the expression has not been homogenized yet
-    fn homogenize(self) -> (Expr<F>, usize) {
+    pub fn homogenize(self) -> (Expr<F>, usize) {
         match self {
             Expr::Slack(_) => panic!("Should not contain existing slack variable"),
             Expr::Negated(e) => {
@@ -219,10 +220,7 @@ impl<F> Expr<F> {
         sum: &impl Fn(T, T) -> T,
         product: &impl Fn(T, T) -> T,
         scaled: &impl Fn(T, F) -> T,
-    ) -> T
-    where
-        F: Copy,
-    {
+    ) -> T {
         match self {
             Expr::Slack(d) => slack(*d),
             Expr::Constant(scalar) => constant(*scalar),
@@ -323,9 +321,161 @@ impl<F> Expr<F> {
             }
         }
     }
+
+    /// Approximate the computational complexity of this expression.
+    pub fn complexity(&self) -> usize {
+        match self {
+            Expr::Slack(_) => 1,
+            Expr::Constant(_) => 0,
+            // Selectors should always be evaluated first
+            Expr::Selector(_) => 0,
+            Expr::Fixed(_) => 1,
+            Expr::Advice(_) => 1,
+            Expr::Instance(_) => 1,
+            Expr::Challenge(_, _) => 1,
+            Expr::Negated(poly) => poly.complexity() + 5,
+            Expr::Sum(a, b) => a.complexity() + b.complexity() + 15,
+            Expr::Product(a, b) => a.complexity() + b.complexity() + 30,
+            Expr::Scaled(poly, _) => poly.complexity() + 30,
+        }
+    }
+
+    /// Evaluate the polynomial lazily using the provided closures to perform the
+    /// operations.
+    pub fn evaluate_lazy<T: PartialEq>(
+        &self,
+        slack: &impl Fn(usize) -> T,
+        constant: &impl Fn(F) -> T,
+        selector_column: &impl Fn(Selector) -> T,
+        fixed_column: &impl Fn(FixedQuery) -> T,
+        advice_column: &impl Fn(AdviceQuery) -> T,
+        instance_column: &impl Fn(InstanceQuery) -> T,
+        challenge: &impl Fn(Challenge, usize) -> T,
+        negated: &impl Fn(T) -> T,
+        sum: &impl Fn(T, T) -> T,
+        product: &impl Fn(T, T) -> T,
+        scaled: &impl Fn(T, F) -> T,
+        zero: &T,
+    ) -> T {
+        match self {
+            Expr::Slack(power) => slack(*power),
+            Expr::Constant(scalar) => constant(*scalar),
+            Expr::Selector(selector) => selector_column(*selector),
+            Expr::Fixed(query) => fixed_column(*query),
+            Expr::Advice(query) => advice_column(*query),
+            Expr::Instance(query) => instance_column(*query),
+            Expr::Challenge(value, power) => challenge(*value, *power),
+            Expr::Negated(a) => {
+                let a = a.evaluate_lazy(
+                    slack,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    challenge,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                    zero,
+                );
+                negated(a)
+            }
+            Expr::Sum(a, b) => {
+                let a = a.evaluate_lazy(
+                    slack,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    challenge,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                    zero,
+                );
+                let b = b.evaluate_lazy(
+                    slack,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    challenge,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                    zero,
+                );
+                sum(a, b)
+            }
+            Expr::Product(a, b) => {
+                let (a, b) = if a.complexity() <= b.complexity() {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                let a = a.evaluate_lazy(
+                    slack,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    challenge,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                    zero,
+                );
+
+                if a == *zero {
+                    a
+                } else {
+                    let b = b.evaluate_lazy(
+                        slack,
+                        constant,
+                        selector_column,
+                        fixed_column,
+                        advice_column,
+                        instance_column,
+                        challenge,
+                        negated,
+                        sum,
+                        product,
+                        scaled,
+                        zero,
+                    );
+                    product(a, b)
+                }
+            }
+            Expr::Scaled(a, f) => {
+                let a = a.evaluate_lazy(
+                    slack,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    challenge,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                    zero,
+                );
+                scaled(a, *f)
+            }
+        }
+    }
 }
 
-impl<F: std::fmt::Debug> std::fmt::Debug for Expr<F> {
+impl<F: std::fmt::Debug + Field> std::fmt::Debug for Expr<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Expr::Slack(d) => f.debug_tuple("Slack").field(d).finish(),

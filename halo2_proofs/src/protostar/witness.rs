@@ -165,10 +165,69 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
     }
 }
 
+pub fn create_instance_polys<
+    Scheme: CommitmentScheme,
+    E: EncodedChallenge<Scheme::Curve>,
+    R: RngCore,
+    T: TranscriptWrite<Scheme::Curve, E>,
+    ConcreteCircuit: Circuit<Scheme::Scalar>,
+>(
+    cs: &ConstraintSystem<Scheme::Scalar>,
+    instances: &[&[Scheme::Scalar]],
+    transcript: &mut T,
+) -> Result<Vec<Polynomial<Scheme::Scalar, LagrangeCoeff>>, Error> {
+    if instances.len() != cs.num_instance_columns {
+        return Err(Error::InvalidInstances);
+    }
+    // TODO(@adr1anh): refactor into own function
+    // generate polys for instance columns
+    // NOTE(@adr1anh): In the case where the verifier does not query the instance,
+    // we do not need to create a Lagrange polynomial of size n.
+    let instance_polys = instances
+        .iter()
+        .map(|values| {
+            let mut poly = empty_lagrange(values.len());
+
+            if values.len() > (poly.len() - (cs.blinding_factors() + 1)) {
+                return Err(Error::InstanceTooLarge);
+            }
+            for (poly, value) in poly.iter_mut().zip(values.iter()) {
+                // The instance is part of the transcript
+                // if !P::QUERY_INSTANCE {
+                //     transcript.common_scalar(*value)?;
+                // }
+                transcript.common_scalar(*value)?;
+                *poly = *value;
+            }
+            Ok(poly)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // // For large instances, we send a commitment to it and open it with PCS
+    // if P::QUERY_INSTANCE {
+    //     let instance_commitments_projective: Vec<_> = instance_polys
+    //         .iter()
+    //         .map(|poly| params.commit_lagrange(poly, Blind::default()))
+    //         .collect();
+    //     let mut instance_commitments =
+    //         vec![Scheme::Curve::identity(); instance_commitments_projective.len()];
+    //     <Scheme::Curve as CurveAffine>::CurveExt::batch_normalize(
+    //         &instance_commitments_projective,
+    //         &mut instance_commitments,
+    //     );
+    //     let instance_commitments = instance_commitments;
+    //     drop(instance_commitments_projective);
+
+    //     for commitment in &instance_commitments {
+    //         transcript.common_point(*commitment)?;
+    //     }
+    // }
+    Ok(instance_polys)
+}
+
 /// Advice polynomials sent by the prover during the first phases of
 /// the IOP protocol.
-pub struct GateTranscript<F: Field> {
-    pub instance_polys: Vec<Polynomial<F, LagrangeCoeff>>,
+pub struct AdviceTranscript<F: Field> {
     pub advice_polys: Vec<Polynomial<F, LagrangeCoeff>>,
     // blinding values for advice_polys, same length as advice_polys
     pub advice_blinds: Vec<Blind<F>>,
@@ -176,88 +235,41 @@ pub struct GateTranscript<F: Field> {
 }
 
 /// Runs the witness generation for the first phase of the protocol
-pub fn create_gate_transcript<
-    'params,
+/// TODO(@adr1anh): rename to generate advice
+pub fn create_advice_transcript<
     Scheme: CommitmentScheme,
-    P: Prover<'params, Scheme>,
     E: EncodedChallenge<Scheme::Curve>,
     R: RngCore,
     T: TranscriptWrite<Scheme::Curve, E>,
     ConcreteCircuit: Circuit<Scheme::Scalar>,
 >(
-    params: &'params Scheme::ParamsProver,
-    vk: &VerifyingKey<Scheme::Curve>,
+    params: &Scheme::ParamsProver,
+    // TODO(@adr1anh): remove and replace with cs?
+    cs: &ConstraintSystem<Scheme::Scalar>,
     circuit: &ConcreteCircuit,
     // raw instance columns
     instances: &[&[Scheme::Scalar]],
     mut rng: R,
     transcript: &mut T,
-) -> Result<GateTranscript<Scheme::Scalar>, Error>
-where
-    Scheme::Scalar: WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
+) -> Result<AdviceTranscript<Scheme::Scalar>, Error>
+// where
+//     Scheme::Scalar: FromUniformBytes<64>,
 {
-    if instances.len() != vk.cs().num_instance_columns {
-        return Err(Error::InvalidInstances);
-    }
-
     let n = params.n() as usize;
-    let domain = vk.get_domain();
 
-    // Hash verification key into transcript
-    vk.hash_into(transcript)?;
+    let config = {
+        let mut meta = ConstraintSystem::default();
 
-    let mut meta = ConstraintSystem::default();
-
-    #[cfg(feature = "circuit-params")]
-    let config = ConcreteCircuit::configure_with_params(&mut meta, circuit.params());
-    #[cfg(not(feature = "circuit-params"))]
-    let config = ConcreteCircuit::configure(&mut meta);
+        #[cfg(feature = "circuit-params")]
+        let config = ConcreteCircuit::configure_with_params(&mut meta, circuit.params());
+        #[cfg(not(feature = "circuit-params"))]
+        let config = ConcreteCircuit::configure(&mut meta);
+        config
+    };
 
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
-    let meta = &vk.cs();
-
-    // generate polys for instance columns
-    // NOTE(@adr1anh): In the case where the verifier does not query the instance,
-    // we do not need to create a Lagrange polynomial of size n.
-    let instance_polys = instances
-        .iter()
-        .map(|values| {
-            let mut poly = empty_lagrange(n);
-
-            if values.len() > (poly.len() - (meta.blinding_factors() + 1)) {
-                return Err(Error::InstanceTooLarge);
-            }
-            for (poly, value) in poly.iter_mut().zip(values.iter()) {
-                // The instance is part of the transcript
-                if !P::QUERY_INSTANCE {
-                    transcript.common_scalar(*value)?;
-                }
-                *poly = *value;
-            }
-            Ok(poly)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // For large instances, we send a commitment to it and open it with PCS
-    if P::QUERY_INSTANCE {
-        let instance_commitments_projective: Vec<_> = instance_polys
-            .iter()
-            .map(|poly| params.commit_lagrange(poly, Blind::default()))
-            .collect();
-        let mut instance_commitments =
-            vec![Scheme::Curve::identity(); instance_commitments_projective.len()];
-        <Scheme::Curve as CurveAffine>::CurveExt::batch_normalize(
-            &instance_commitments_projective,
-            &mut instance_commitments,
-        );
-        let instance_commitments = instance_commitments;
-        drop(instance_commitments_projective);
-
-        for commitment in &instance_commitments {
-            transcript.common_point(*commitment)?;
-        }
-    }
+    let meta = &cs;
 
     // Synthesize the circuit over multiple iterations
     let (advice_polys, advice_blinds, challenges) = {
@@ -284,7 +296,7 @@ where
         };
 
         // For each phase
-        for current_phase in vk.cs().phases() {
+        for current_phase in cs.phases() {
             witness.current_phase = current_phase;
             let column_indices = meta
                 .advice_column_phase
@@ -375,8 +387,8 @@ where
 
         (advice_polys, advice_blinds, challenges)
     };
-    Ok(GateTranscript {
-        instance_polys,
+
+    Ok(AdviceTranscript {
         advice_polys,
         advice_blinds,
         challenges,
@@ -416,14 +428,14 @@ mod tests {
         let params = poly::ipa::commitment::ParamsIPA::<_>::new(K);
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         let vk = keygen_vk(&params, &circuit).unwrap();
-        let data = create_gate_transcript::<
-            IPACommitmentScheme<pallas::Affine>,
-            ProverIPA<pallas::Affine>,
-            _,
-            _,
-            _,
-            _,
-        >(&params, &vk, &circuit, &[], rng, &mut transcript);
+        let data = create_advice_transcript::<IPACommitmentScheme<pallas::Affine>, _, _, _, _>(
+            &params,
+            &vk.cs(),
+            &circuit,
+            &[],
+            rng,
+            &mut transcript,
+        );
         assert!(data.is_ok());
     }
 }

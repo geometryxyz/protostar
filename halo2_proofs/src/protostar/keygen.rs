@@ -15,9 +15,13 @@ use crate::{
     },
 };
 
-pub struct ProvingKey<C: CurveAffine> {
+pub struct CircuitData<C: CurveAffine> {
+    // number of rows
     pub n: u64,
+    // ceil(log(n))
     pub k: u32,
+    // max active rows, without blinding
+    pub usable_rows: Range<usize>,
     // gates, lookups, advice, fixed columns
     pub cs: ConstraintSystem<C::Scalar>,
     // fixed[fixed_col][row]
@@ -25,16 +29,18 @@ pub struct ProvingKey<C: CurveAffine> {
     // selectors[gate][row]
     pub selectors: Vec<Vec<bool>>,
     // permutations[advice_col][row] = sigma(advice_col*n+row)
+    // advice_col are from cs.permutation
+    // maybe store as Vec<Vec<(usize,usize)>)
     pub permutations: Vec<Vec<usize>>,
-    // pub ev: Evaluator<C>,
+    // lookups?
 }
 
-impl<C: CurveAffine> ProvingKey<C> {
-    /// Generate new ProvingKey from ...
+impl<C: CurveAffine> CircuitData<C> {
+    /// Generate from the circuit, parametrized on the commitment scheme.
     pub fn new<'params, P, ConcreteCircuit>(
         params: &P,
         circuit: &ConcreteCircuit,
-    ) -> Result<ProvingKey<C>, Error>
+    ) -> Result<CircuitData<C>, Error>
     where
         C: CurveAffine,
         P: Params<'params, C>,
@@ -95,9 +101,10 @@ impl<C: CurveAffine> ProvingKey<C> {
         // TODO(@adr1anh): Define different Evaluator structuse
         // let ev = Evaluator::new(&vk.cs);
 
-        Ok(ProvingKey {
+        Ok(CircuitData {
             n: params.n(),
             k: params.k(),
+            usable_rows: assembly.usable_rows,
             cs,
             fixed,
             selectors: assembly.selectors,
