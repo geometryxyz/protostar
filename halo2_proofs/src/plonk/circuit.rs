@@ -452,7 +452,7 @@ impl TryFrom<Column<Any>> for Column<Instance> {
 ///     Ok(())
 /// }
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Selector(pub(crate) usize, bool);
 
 impl Selector {
@@ -479,7 +479,7 @@ impl Selector {
 }
 
 /// Query of fixed column at a certain relative location
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FixedQuery {
     /// Query index
     pub(crate) index: Option<usize>,
@@ -502,7 +502,7 @@ impl FixedQuery {
 }
 
 /// Query of advice column at a certain relative location
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AdviceQuery {
     /// Query index
     pub(crate) index: Option<usize>,
@@ -532,7 +532,7 @@ impl AdviceQuery {
 }
 
 /// Query of instance column at a certain relative location
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InstanceQuery {
     /// Query index
     pub(crate) index: Option<usize>,
@@ -583,7 +583,7 @@ impl TableColumn {
 }
 
 /// A challenge squeezed from transcript after advice columns at the phase have been committed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Challenge {
     index: usize,
     pub(crate) phase: sealed::Phase,
@@ -1247,6 +1247,34 @@ impl<F: Field> Expression<F> {
             &op,
             &|a, _| a,
         )
+    }
+
+    /// Applies `f` to all leaves
+    pub fn traverse(&self, f: &mut impl FnMut(&Expression<F>)) {
+        match self {
+            Expression::Negated(e) => e.traverse(f),
+            Expression::Sum(e1, e2) => {
+                e1.traverse(f);
+                e2.traverse(f);
+            }
+            Expression::Product(e1, e2) => {
+                e1.traverse(f);
+                e2.traverse(f);
+            }
+            Expression::Scaled(e, _) => e.traverse(f),
+            v => f(v),
+        }
+    }
+
+    /// If the whole polynomial is multiplied by a simple selector, return it along with the expression it selects
+    pub fn extract_top_selector(&self) -> (Option<Selector>, &Expression<F>) {
+        match self {
+            Expression::Product(e1, e2) => match (&**e1, &**e2) {
+                (Expression::Selector(s), e) | (e, Expression::Selector(s)) => (Some(*s), e),
+                _ => (None, self),
+            },
+            _ => (None, self),
+        }
     }
 }
 

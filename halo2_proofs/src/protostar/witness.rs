@@ -168,9 +168,7 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
 pub fn create_instance_polys<
     Scheme: CommitmentScheme,
     E: EncodedChallenge<Scheme::Curve>,
-    R: RngCore,
     T: TranscriptWrite<Scheme::Curve, E>,
-    ConcreteCircuit: Circuit<Scheme::Scalar>,
 >(
     cs: &ConstraintSystem<Scheme::Scalar>,
     instances: &[&[Scheme::Scalar]],
@@ -433,7 +431,7 @@ mod tests {
             &vk.cs(),
             &circuit,
             &[],
-            rng,
+            &mut rng,
             &mut transcript,
         );
         assert!(data.is_ok());

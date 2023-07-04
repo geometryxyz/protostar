@@ -287,13 +287,9 @@ impl Assembly {
         }
     }
 
-    pub(crate) fn build_permutations<'params, C: CurveAffine, P: Params<'params, C>>(
-        &mut self,
-        params: &P,
-        p: &Argument,
-    ) -> Vec<Vec<usize>> {
+    pub(crate) fn build_permutations(&mut self, n: usize, p: &Argument) -> Vec<Vec<usize>> {
         self.build_ordered_mapping();
-        build_permutations(params, p, |i, j| self.mapping_at_idx(i, j))
+        build_permutations(n, p, |i, j| self.mapping_at_idx(i, j))
     }
 
     pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
@@ -333,12 +329,11 @@ impl Assembly {
     }
 }
 
-pub(crate) fn build_permutations<'params, C: CurveAffine, P: Params<'params, C>>(
-    params: &P,
+pub(crate) fn build_permutations(
+    n: usize,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
 ) -> Vec<Vec<usize>> {
-    let n = params.n() as usize;
     // Compute permutation polynomials, convert to coset form.
     let mut permutations = vec![vec![0; n]; p.columns.len()];
     {

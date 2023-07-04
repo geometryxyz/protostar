@@ -1,21 +1,27 @@
-use std::ops::Range;
+use std::{collections::BTreeSet, ops::Range};
 
+use super::expression::Expr;
 use ff::Field;
 use halo2curves::CurveAffine;
 
 use crate::{
     circuit::{layouter::SyncDeps, Value},
     plonk::{
-        circuit::FloorPlanner, permutation, Advice, Any, Assigned, Assignment, Challenge, Circuit,
-        Column, ConstraintSystem, Error, Fixed, Instance, Selector,
+        circuit::FloorPlanner, permutation, Advice, AdviceQuery, Any, Assigned, Assignment,
+        Challenge, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, FixedQuery,
+        Instance, InstanceQuery, Selector,
     },
     poly::{
         batch_invert_assigned, commitment::Params, empty_lagrange, empty_lagrange_assigned,
         EvaluationDomain, LagrangeCoeff, Polynomial,
     },
+    protostar::expression::Gate,
 };
 
-pub struct CircuitData<C: CurveAffine> {
+/// CircuitData is the minimal algebraic representation of a PlonK-ish circuit.
+/// From this, we can derive the Proving/Verification keys for a chosen proof system.
+/// TODO(@adr1anh): this could be generic over F instead
+pub struct CircuitData<F: Field> {
     // number of rows
     pub n: u64,
     // ceil(log(n))
@@ -23,9 +29,9 @@ pub struct CircuitData<C: CurveAffine> {
     // max active rows, without blinding
     pub usable_rows: Range<usize>,
     // gates, lookups, advice, fixed columns
-    pub cs: ConstraintSystem<C::Scalar>,
+    pub cs: ConstraintSystem<F>,
     // fixed[fixed_col][row]
-    pub fixed: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    pub fixed: Vec<Polynomial<F, LagrangeCoeff>>,
     // selectors[gate][row]
     pub selectors: Vec<Vec<bool>>,
     // permutations[advice_col][row] = sigma(advice_col*n+row)
@@ -35,16 +41,14 @@ pub struct CircuitData<C: CurveAffine> {
     // lookups?
 }
 
-impl<C: CurveAffine> CircuitData<C> {
+impl<F: Field> CircuitData<F> {
     /// Generate from the circuit, parametrized on the commitment scheme.
-    pub fn new<'params, P, ConcreteCircuit>(
-        params: &P,
+    pub fn new<ConcreteCircuit>(
+        n: usize,
         circuit: &ConcreteCircuit,
-    ) -> Result<CircuitData<C>, Error>
+    ) -> Result<CircuitData<F>, Error>
     where
-        C: CurveAffine,
-        P: Params<'params, C>,
-        ConcreteCircuit: Circuit<C::Scalar>,
+        ConcreteCircuit: Circuit<F>,
     {
         let mut cs = ConstraintSystem::default();
         #[cfg(feature = "circuit-params")]
@@ -56,21 +60,21 @@ impl<C: CurveAffine> CircuitData<C> {
         // let degree = cs.degree();
 
         let cs = cs;
+        let k = n.next_power_of_two() as u32;
 
-        let n = params.n() as usize;
-
-        if (params.n() as usize) < cs.minimum_rows() {
-            return Err(Error::not_enough_rows_available(params.k()));
+        if n < cs.minimum_rows() {
+            // TODO(@adr1anh): Why is this k instead of n?
+            return Err(Error::not_enough_rows_available(k));
         }
 
-        let mut assembly: Assembly<C::Scalar> = Assembly {
-            k: params.k(),
+        let mut assembly: Assembly<F> = Assembly {
+            k,
             fixed: vec![empty_lagrange_assigned(n); cs.num_fixed_columns],
-            permutation: permutation::keygen::Assembly::new(params.n() as usize, &cs.permutation),
-            selectors: vec![vec![false; params.n() as usize]; cs.num_selectors],
+            permutation: permutation::keygen::Assembly::new(n, &cs.permutation),
+            selectors: vec![vec![false; n]; cs.num_selectors],
             // We don't need blinding factors for Protostar, but later for the Decider,
             // leave for now
-            usable_rows: 0..params.n() as usize - (cs.blinding_factors() + 1),
+            usable_rows: 0..n - (cs.blinding_factors() + 1),
             _marker: std::marker::PhantomData,
         };
 
@@ -93,17 +97,11 @@ impl<C: CurveAffine> CircuitData<C> {
         //         .map(|poly| domain.lagrange_from_vec(poly)),
         // );
 
-        let permutations = assembly
-            .permutation
-            .build_permutations(params, &cs.permutation);
-
-        // Compute the optimized evaluation data structure
-        // TODO(@adr1anh): Define different Evaluator structuse
-        // let ev = Evaluator::new(&vk.cs);
+        let permutations = assembly.permutation.build_permutations(n, &cs.permutation);
 
         Ok(CircuitData {
-            n: params.n(),
-            k: params.k(),
+            n: n as u64,
+            k,
             usable_rows: assembly.usable_rows,
             cs,
             fixed,
@@ -285,5 +283,30 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 
     fn pop_namespace(&mut self, _: Option<String>) {
         // Do nothing; we don't care about namespaces in this context.
+    }
+}
+
+// struct VerifyingKey<C: CurveAffine> {
+//     _phantom: PhantomData<C>,
+// }
+
+pub struct ProvingKey<'cd, F: Field> {
+    pub circuit_data: &'cd CircuitData<F>,
+    pub gates: Vec<Gate<F>>,
+    // vk: VerifyingKey<C>,
+    // ev etc?
+}
+
+impl<'cd, F: Field> ProvingKey<'cd, F> {
+    pub fn new(circuit_data: &'cd CircuitData<F>) -> Result<ProvingKey<'cd, F>, Error> {
+        let gates: Vec<Gate<_>> = circuit_data.cs.gates().iter().map(Gate::from).collect();
+
+        // let vk = VerifyingKey {
+        //     _phantom: Default::default(),
+        // };
+        Ok(ProvingKey {
+            circuit_data,
+            gates,
+        })
     }
 }
