@@ -128,12 +128,8 @@ impl Assembly {
         build_pk(params, domain, p, |i, j| self.mapping[i][j])
     }
 
-    pub(crate) fn build_permutations<'params, C: CurveAffine, P: Params<'params, C>>(
-        &mut self,
-        params: &P,
-        p: &Argument,
-    ) -> Vec<Vec<usize>> {
-        build_permutations(params, p, |i, j| self.mapping[i][j])
+    pub(crate) fn build_permutations(&mut self, n: usize, p: &Argument) -> Vec<Vec<usize>> {
+        build_permutations(n, p, |i, j| self.mapping[i][j])
     }
 
     /// Returns columns that participate in the permutation argument.
