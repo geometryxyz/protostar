@@ -170,6 +170,7 @@ pub fn create_instance_polys<
     E: EncodedChallenge<Scheme::Curve>,
     T: TranscriptWrite<Scheme::Curve, E>,
 >(
+    params: &Scheme::ParamsProver,
     cs: &ConstraintSystem<Scheme::Scalar>,
     instances: &[&[Scheme::Scalar]],
     transcript: &mut T,
@@ -177,6 +178,8 @@ pub fn create_instance_polys<
     if instances.len() != cs.num_instance_columns {
         return Err(Error::InvalidInstances);
     }
+    let n = params.n() as usize;
+
     // TODO(@adr1anh): refactor into own function
     // generate polys for instance columns
     // NOTE(@adr1anh): In the case where the verifier does not query the instance,
@@ -184,7 +187,7 @@ pub fn create_instance_polys<
     let instance_polys = instances
         .iter()
         .map(|values| {
-            let mut poly = empty_lagrange(values.len());
+            let mut poly = empty_lagrange(n);
 
             if values.len() > (poly.len() - (cs.blinding_factors() + 1)) {
                 return Err(Error::InstanceTooLarge);
@@ -226,10 +229,10 @@ pub fn create_instance_polys<
 /// Advice polynomials sent by the prover during the first phases of
 /// the IOP protocol.
 pub struct AdviceTranscript<F: Field> {
+    pub challenges: Vec<F>,
     pub advice_polys: Vec<Polynomial<F, LagrangeCoeff>>,
     // blinding values for advice_polys, same length as advice_polys
     pub advice_blinds: Vec<Blind<F>>,
-    pub challenges: Vec<F>,
 }
 
 /// Runs the witness generation for the first phase of the protocol
@@ -242,17 +245,13 @@ pub fn create_advice_transcript<
     ConcreteCircuit: Circuit<Scheme::Scalar>,
 >(
     params: &Scheme::ParamsProver,
-    // TODO(@adr1anh): remove and replace with cs?
     cs: &ConstraintSystem<Scheme::Scalar>,
     circuit: &ConcreteCircuit,
     // raw instance columns
     instances: &[&[Scheme::Scalar]],
     mut rng: R,
     transcript: &mut T,
-) -> Result<AdviceTranscript<Scheme::Scalar>, Error>
-// where
-//     Scheme::Scalar: FromUniformBytes<64>,
-{
+) -> Result<AdviceTranscript<Scheme::Scalar>, Error> {
     let n = params.n() as usize;
 
     let config = {

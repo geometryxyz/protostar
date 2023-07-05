@@ -8,16 +8,24 @@ use crate::{
     plonk::{Circuit, Error, FixedQuery},
     poly::{
         commitment::{CommitmentScheme, Prover},
-        Rotation,
+        LagrangeCoeff, Polynomial, Rotation,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
 use super::{
-    expression::Expr,
+    error_check::{AccumulatorInstance, AccumulatorWitness, GateEvaluationCache},
+    gate::Expr,
     keygen::{CircuitData, ProvingKey},
     witness::{create_advice_transcript, create_instance_polys},
 };
+
+struct WitnessTranscript<F: Field> {
+    challenges: Vec<F>,
+    instance: Vec<Polynomial<F, LagrangeCoeff>>,
+    advice: Vec<Polynomial<F, LagrangeCoeff>>,
+    advice_blinds: Vec<F>,
+}
 
 ///
 fn create_proof<
@@ -42,7 +50,7 @@ where
 
     // Create polynomials from instance, and
     let instance_polys =
-        create_instance_polys::<Scheme, E, T>(&pk.circuit_data.cs, instances, transcript)?;
+        create_instance_polys::<Scheme, E, T>(&params, &pk.circuit_data.cs, instances, transcript)?;
     let advice_transcript = create_advice_transcript::<Scheme, E, R, T, ConcreteCircuit>(
         params,
         &pk.circuit_data.cs,
@@ -55,9 +63,37 @@ where
     let fixed_polys = &pk.circuit_data.fixed;
     let selectors = &pk.circuit_data.selectors;
 
-    let advice_polys = &advice_transcript.advice_polys;
-    let challenges = &advice_transcript.challenges;
     let n = pk.circuit_data.usable_rows.end as i32;
+
+    let new_instance = AccumulatorInstance::new(pk, advice_transcript.challenges, instance_polys);
+    let acc_instance = new_instance.clone();
+    //    AccumulatorInstance::new_empty(pk);
+
+    let new_witness = AccumulatorWitness::new(
+        advice_transcript.advice_polys,
+        advice_transcript.advice_blinds,
+    );
+    let acc_witness = new_witness.clone();
+    //     AccumulatorWitness::<Scheme::Scalar>::new_empty(n as usize, pk.circuit_data.n as usize);
+
+    let mut gate_caches: Vec<_> = pk
+        .gates
+        .iter()
+        .map(|gate| GateEvaluationCache::new(gate, &acc_instance, &new_instance, 1))
+        .collect();
+
+    for row_idx in pk.circuit_data.usable_rows.clone().into_iter() {
+        for gate_cache in gate_caches.iter_mut() {
+            let evals =
+                gate_cache.evaluate(row_idx, n, &pk.circuit_data, &acc_witness, &new_witness);
+            if let Some(evals) = evals {
+                for eval in evals.iter() {
+                    debug_assert!(eval[0].is_zero_vartime());
+                    // debug_assert!(eval[1].is_zero_vartime());
+                }
+            }
+        }
+    }
 
     // for i in pk.circuit_data.usable_rows.clone().into_iter() {
     //     for gate in pk.circuit_data.cs.gates() {

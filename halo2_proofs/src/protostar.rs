@@ -2,7 +2,7 @@
 
 mod error_check;
 mod evaluation;
-mod expression;
+mod gate;
 mod keygen;
 mod prover;
 mod shuffle;

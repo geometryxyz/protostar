@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, ops::Range};
 
-use super::expression::Expr;
+use super::gate::{Expr, Gate};
 use ff::Field;
 use halo2curves::CurveAffine;
 
@@ -15,7 +15,6 @@ use crate::{
         batch_invert_assigned, commitment::Params, empty_lagrange, empty_lagrange_assigned,
         EvaluationDomain, LagrangeCoeff, Polynomial,
     },
-    protostar::expression::Gate,
 };
 
 /// CircuitData is the minimal algebraic representation of a PlonK-ish circuit.
@@ -293,6 +292,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 pub struct ProvingKey<'cd, F: Field> {
     pub circuit_data: &'cd CircuitData<F>,
     pub gates: Vec<Gate<F>>,
+    pub max_degree: usize,
     // vk: VerifyingKey<C>,
     // ev etc?
 }
@@ -301,12 +301,18 @@ impl<'cd, F: Field> ProvingKey<'cd, F> {
     pub fn new(circuit_data: &'cd CircuitData<F>) -> Result<ProvingKey<'cd, F>, Error> {
         let gates: Vec<Gate<_>> = circuit_data.cs.gates().iter().map(Gate::from).collect();
 
+        let max_degree = *gates
+            .iter()
+            .map(|g| g.degrees.iter().max().unwrap())
+            .max()
+            .unwrap();
         // let vk = VerifyingKey {
         //     _phantom: Default::default(),
         // };
         Ok(ProvingKey {
             circuit_data,
             gates,
+            max_degree,
         })
     }
 }

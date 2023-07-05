@@ -1265,17 +1265,6 @@ impl<F: Field> Expression<F> {
             v => f(v),
         }
     }
-
-    /// If the whole polynomial is multiplied by a simple selector, return it along with the expression it selects
-    pub fn extract_top_selector(&self) -> (Option<Selector>, &Expression<F>) {
-        match self {
-            Expression::Product(e1, e2) => match (&**e1, &**e2) {
-                (Expression::Selector(s), e) | (e, Expression::Selector(s)) => (Some(*s), e),
-                _ => (None, self),
-            },
-            _ => (None, self),
-        }
-    }
 }
 
 impl<F: std::fmt::Debug> std::fmt::Debug for Expression<F> {
