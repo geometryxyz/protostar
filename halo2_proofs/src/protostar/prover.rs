@@ -1,10 +1,11 @@
-use std::marker::PhantomData;
+use std::{iter::zip, marker::PhantomData};
 
 use ff::{Field, FromUniformBytes};
 use halo2curves::CurveAffine;
 use rand_core::RngCore;
 
 use crate::{
+    arithmetic::lagrange_interpolate,
     plonk::{Circuit, Error, FixedQuery},
     poly::{
         commitment::{CommitmentScheme, Prover},
@@ -15,7 +16,7 @@ use crate::{
 
 use super::{
     error_check::{AccumulatorInstance, AccumulatorWitness, GateEvaluationCache},
-    gate::Expr,
+    gate::{self, Expr},
     keygen::{CircuitData, ProvingKey},
     witness::{create_advice_transcript, create_instance_polys},
 };
@@ -48,9 +49,10 @@ where
     // Hash verification key into transcript
     // pk.vk.hash_into(transcript)?;
 
-    // Create polynomials from instance, and
+    // Create polynomials from instance and add to transcript
     let instance_polys =
         create_instance_polys::<Scheme, E, T>(&params, &pk.circuit_data.cs, instances, transcript)?;
+    // Create advice columns and add to transcript
     let advice_transcript = create_advice_transcript::<Scheme, E, R, T, ConcreteCircuit>(
         params,
         &pk.circuit_data.cs,
@@ -60,76 +62,84 @@ where
         transcript,
     )?;
 
-    let fixed_polys = &pk.circuit_data.fixed;
-    let selectors = &pk.circuit_data.selectors;
-
     let n = pk.circuit_data.usable_rows.end as i32;
 
     let new_instance = AccumulatorInstance::new(pk, advice_transcript.challenges, instance_polys);
-    let acc_instance = new_instance.clone();
-    //    AccumulatorInstance::new_empty(pk);
+    let acc_instance = AccumulatorInstance::new_empty(pk);
+    // let acc_instance = new_instance.clone();
 
     let new_witness = AccumulatorWitness::new(
         advice_transcript.advice_polys,
         advice_transcript.advice_blinds,
     );
-    let acc_witness = new_witness.clone();
-    //     AccumulatorWitness::<Scheme::Scalar>::new_empty(n as usize, pk.circuit_data.n as usize);
+    let acc_witness = AccumulatorWitness::new_empty(pk);
+    // let acc_witness = new_witness.clone();
 
+    let num_extra_evaluations = 3;
     let mut gate_caches: Vec<_> = pk
         .gates
         .iter()
-        .map(|gate| GateEvaluationCache::new(gate, &acc_instance, &new_instance, 1))
+        .map(|gate| {
+            GateEvaluationCache::new(gate, &acc_instance, &new_instance, num_extra_evaluations)
+        })
+        .collect();
+
+    // for poly in gate_caches
+    //     .iter()
+    //     .flat_map(|gate_chache| gate_chache.gate.polys.iter())
+    // {
+    //     println!("{:?}", poly);
+    // }
+
+    let num_evals = pk.max_degree + 1 + num_extra_evaluations;
+
+    // DEBUG: Evaluation points used to do lagrange interpolation
+    let points = {
+        let mut points = Vec::with_capacity(num_evals);
+        points.push(Scheme::Scalar::ZERO);
+        for i in 1..num_evals {
+            points.push(points[i - 1] + Scheme::Scalar::ONE);
+        }
+        points
+    };
+
+    // eval_sums[gate_idx][constraint_idx][eval_idx]
+    let mut eval_sums: Vec<_> = gate_caches
+        .iter()
+        .map(|gate_cache| gate_cache.gate_eval.clone())
         .collect();
 
     for row_idx in pk.circuit_data.usable_rows.clone().into_iter() {
-        for gate_cache in gate_caches.iter_mut() {
+        for (gate_idx, gate_cache) in gate_caches.iter_mut().enumerate() {
             let evals =
                 gate_cache.evaluate(row_idx, n, &pk.circuit_data, &acc_witness, &new_witness);
             if let Some(evals) = evals {
-                for eval in evals.iter() {
-                    debug_assert!(eval[0].is_zero_vartime());
-                    // debug_assert!(eval[1].is_zero_vartime());
+                for (poly_idx, poly_evals) in evals.iter().enumerate() {
+                    // DEBUG: Check that the last `num_extra_evaluations` coeffs are zero
+                    let poly_points = &points[..poly_evals.len()];
+                    let eval_coeffs = lagrange_interpolate(poly_points, poly_evals);
+                    debug_assert_ne!(eval_coeffs.len(), 0);
+
+                    for (existing, new) in
+                        zip(eval_sums[gate_idx][poly_idx].iter_mut(), poly_evals.iter())
+                    {
+                        *existing += new;
+                    }
                 }
             }
         }
     }
 
-    // for i in pk.circuit_data.usable_rows.clone().into_iter() {
-    //     for gate in pk.circuit_data.cs.gates() {
-    //         for poly in gate.polynomials() {
-    //             let e: Expr<Scheme::Scalar> = poly.clone().into();
-    //             let result = e.evaluate_lazy(
-    //                 &|_slack| 1.into(),
-    //                 &|constant| constant,
-    //                 &|selector| {
-    //                     if selectors[selector.0][i] {
-    //                         Scheme::Scalar::ONE
-    //                     } else {
-    //                         Scheme::Scalar::ZERO
-    //                     }
-    //                 },
-    //                 &|fixed| {
-    //                     fixed_polys[fixed.column_index][get_rotation_idx(i, fixed.rotation(), n)]
-    //                 },
-    //                 &|advice| {
-    //                     advice_polys[advice.column_index][get_rotation_idx(i, advice.rotation(), n)]
-    //                 },
-    //                 &|instance| {
-    //                     instance_polys[instance.column_index]
-    //                         [get_rotation_idx(i, instance.rotation(), n)]
-    //                 },
-    //                 &|challenge, power| challenges[challenge.index()].pow_vartime([power as u64]),
-    //                 &|a| -a,
-    //                 &|a, b| a + b,
-    //                 &|a, b| a * b,
-    //                 &|a, b| a * b,
-    //                 &Scheme::Scalar::ZERO,
-    //             );
-    //             assert_eq!(result, Scheme::Scalar::ZERO);
-    //         }
-    //     }
-    // }
+    let eval_coeffs: Vec<_> = eval_sums
+        .iter()
+        .flat_map(|gate_evals| {
+            gate_evals.iter().map(|poly_evals| -> Vec<Scheme::Scalar> {
+                let poly_points = &points[..poly_evals.len()];
+                lagrange_interpolate(poly_points, poly_evals)
+            })
+        })
+        .collect();
+    assert_ne!(eval_coeffs.len(), 0);
 
     Ok(())
 }
@@ -163,7 +173,7 @@ mod tests {
         const W: usize = 4;
         const H: usize = 32;
         const K: u32 = 8;
-        const N: usize = 1 << K;
+        const N: usize = 64; // could be 33?
         let circuit = MyCircuit::<_, W, H>::rand(&mut rng);
 
         let params = poly::ipa::commitment::ParamsIPA::<_>::new(K);

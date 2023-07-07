@@ -437,7 +437,7 @@ impl<F: Field> Assignment<F> for Layout {
         Ok(())
     }
 
-    fn query_instance(&self, _: Column<Instance>, _: usize) -> Result<Value<F>, Error> {
+    fn query_instance(&mut self, _: Column<Instance>, _: usize) -> Result<Value<F>, Error> {
         Ok(Value::unknown())
     }
 

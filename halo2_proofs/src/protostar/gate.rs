@@ -9,10 +9,10 @@ use crate::{
 
 use super::keygen::CircuitData;
 
-/// A Protostar gate is augments the structure of a plonk::Gate to allow for more efficient evaluation
+/// A Protostar gate augments the structure of a plonk::Gate to allow for more efficient evaluation.
 #[derive(Clone)]
 pub struct Gate<F: Field> {
-    // polynomial  expressions where nodes point to indices of elements of `queried_*` vectors
+    // polynomial expressions Gⱼ where nodes point to indices of elements of `queried_*` vectors
     // top-level selector has been extracted into `simple_selectors` if the gate was obtained via `WithSelector`
     pub(super) polys: Vec<Expr<F>>,
     // simple selector for toggling all polys
@@ -28,14 +28,18 @@ pub struct Gate<F: Field> {
     pub(super) queried_advice: Vec<AdviceQuery>,
 }
 
+/// Undo `Constraints::WithSelector` and return the common top-level `Selector` along with the expressions it selects.
+/// If no simple `Selector` is found, returns the original list of polynomials.
 fn extract_simple_selector<F: Field>(
     original_polys: &[Expression<F>],
 ) -> (Vec<Expression<F>>, Option<Selector>) {
     let (mut polys, simple_selectors): (Vec<_>, Vec<_>) = original_polys
         .iter()
         .map(|poly| {
+            // Check whether the top node is a multiplication by a selector
             let (simple_selector, poly) = match poly {
-                // If the whole polynomial is multiplied by a simple selector, return it along with the expression it selects
+                // If the whole polynomial is multiplied by a simple selector,
+                // return it along with the expression it selects
                 Expression::Product(e1, e2) => match (&**e1, &**e2) {
                     (Expression::Selector(s), e) | (e, Expression::Selector(s)) => (Some(*s), e),
                     _ => (None, poly),
@@ -68,6 +72,11 @@ fn extract_simple_selector<F: Field>(
 }
 
 impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
+    /// Create an augmented Protostar gate from a `plonk::Gate`.
+    /// - Extract the common top-level `Selector` if it exists
+    /// - Extract all queries, and replace leaves with indices to the queries stored in the gate
+    /// - Flatten challenges so that a product of the same challenge is replaced by a power of that challenge
+    /// - Homogenize the expression by introcuding a slack variable μ
     fn from(cs_gate: &crate::plonk::Gate<F>) -> Gate<F> {
         let mut selectors = BTreeSet::<Selector>::new();
         let mut fixed = BTreeSet::<FixedQuery>::new();
@@ -123,7 +132,6 @@ impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
             // homogenize the expression by introducing slack variable, returning the degree too
             .map(|e| e.homogenize())
             .unzip();
-        // let max_degree = *degrees.iter().max().unwrap();
 
         Gate {
             polys,
@@ -139,7 +147,7 @@ impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
 }
 
 /// Low-degree expression representing an identity that must hold over the committed columns.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Expr<F> {
     /// This is a slack variable whose purpose is to make the equation homogeneous.
     Slack(usize),
@@ -168,6 +176,8 @@ pub enum Expr<F> {
 }
 
 impl<F: Field> Expression<F> {
+    /// Given lists of all leaves of the original `Expression`, create an `Expr` where the leaves
+    /// correspond to indices of the variable in the lists.
     pub fn to_expr(
         &self,
         selectors: &Vec<Selector>,
@@ -200,9 +210,11 @@ impl<F: Field> Expression<F> {
 }
 
 impl<F: Field> Expr<F> {
+    /// Given the indices of the challenges contained in `self`,
+    /// apply the challenge flattening to all challenges.
     fn flatten_challenges(self, challenges: &[usize]) -> Self {
         // for each challenge, flatten the tree and turn products of the challenge
-        // with powers of the challenge
+        // into powers of the challenge
         challenges
             .iter()
             .fold(self, |acc, c| acc.distribute_challenge(*c, 0))
@@ -264,7 +276,9 @@ impl<F: Field> Expr<F> {
         }
     }
 
-    // Compute the degree where powers of challenges count as 1
+    /// Compute the degree of `Expr`, considering
+    /// `Fixed`, `Advice`, `Instance`, `Challenge` and `Slack` as the variables.
+    /// Powers of challenges are counted as a degree-1 variable.
     fn degree(&self) -> usize {
         match self {
             Expr::Slack(d) => *d,
@@ -281,20 +295,22 @@ impl<F: Field> Expr<F> {
         }
     }
 
-    // Homogenizes self using powers of Expr::Slack, also returning the new degree.
-    // Assumes that the expression has not been homogenized yet
+    /// Homogenizes `self` using powers of `Expr::Slack`, also returning the new degree.
     pub fn homogenize(self) -> (Expr<F>, usize) {
+        // TODO(@adr1anh): Test that this function idempotent
         match self {
-            Expr::Slack(_) => panic!("Should not contain existing slack variable"),
             Expr::Negated(e) => {
                 let (e, d) = e.homogenize();
                 (Expr::Negated(e.into()), d)
             }
             Expr::Sum(e1, e2) => {
+                // Homogenize both branches
                 let (mut e1, d1) = e1.homogenize();
                 let (mut e2, d2) = e2.homogenize();
                 let d = std::cmp::max(d1, d2);
 
+                // if either branch has a lesser homogeneous degree, multiply it by `Expr::Slack`
+                // so that both branches have the same degree `d`.
                 e1 = if d1 < d {
                     Expr::Product(Expr::Slack(d - d1).into(), e1.into())
                 } else {
@@ -310,7 +326,6 @@ impl<F: Field> Expr<F> {
             Expr::Product(e1, e2) => {
                 let (e1, d1) = e1.homogenize();
                 let (e2, d2) = e2.homogenize();
-                // otherwise increase the degree of e_prod to degree
                 (Expr::Product(e1.into(), e2.into()), d1 + d2)
             }
             Expr::Scaled(e, v) => {
@@ -324,7 +339,7 @@ impl<F: Field> Expr<F> {
         }
     }
 
-    /// If self is homogeneous, return the degree, else None
+    /// If `self` is homogeneous, return the degree, else `None`
     fn homogeneous_degree(&self) -> Option<usize> {
         match self {
             Expr::Negated(e) => e.homogeneous_degree(),
@@ -619,7 +634,8 @@ impl<F: Field> Expr<F> {
         }
     }
 
-    fn traverse(&self, f: &mut impl FnMut(&Expr<F>)) {
+    /// Applies `f` to all leaf nodes.
+    pub fn traverse(&self, f: &mut impl FnMut(&Expr<F>)) {
         match self {
             Expr::Negated(e) => e.traverse(f),
             Expr::Sum(e1, e2) => {
@@ -634,62 +650,58 @@ impl<F: Field> Expr<F> {
             v => f(v),
         }
     }
+
+    /// For a given `Challenge` node with index `challenge_idx`,
+    /// returns the maximum power for this challenge appearing in the expression.
+    pub fn max_challenge_power(&self, challenge_idx: usize) -> usize {
+        match self {
+            Expr::Slack(_) => 0,
+            Expr::Constant(_) => 0,
+            Expr::Selector(_) => 0,
+            Expr::Fixed(_) => 0,
+            Expr::Advice(_) => 0,
+            Expr::Instance(_) => 0,
+            Expr::Challenge(c, power) => {
+                if *c == challenge_idx {
+                    *power
+                } else {
+                    0
+                }
+            }
+            Expr::Negated(poly) => poly.max_challenge_power(challenge_idx),
+            Expr::Sum(a, b) => std::cmp::max(
+                a.max_challenge_power(challenge_idx),
+                b.max_challenge_power(challenge_idx),
+            ),
+            Expr::Product(a, b) => std::cmp::max(
+                a.max_challenge_power(challenge_idx),
+                b.max_challenge_power(challenge_idx),
+            ),
+            Expr::Scaled(poly, _) => poly.max_challenge_power(challenge_idx),
+        }
+    }
 }
 
-// impl<F: std::fmt::Debug + Field> std::fmt::Debug for Expr<F> {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             Expr::Slack(d) => f.debug_tuple("Slack").field(d).finish(),
-//             Expr::Constant(scalar) => f.debug_tuple("Constant").field(scalar).finish(),
-//             Expr::Selector(selector) => f.debug_tuple("Selector").field(selector).finish(),
-//             // Skip enum variant and print query struct directly to maintain backwards compatibility.
-//             Expr::Fixed(query) => {
-//                 let mut debug_struct = f.debug_struct("Fixed");
-//                 match query.index {
-//                     None => debug_struct.field("query_index", &query.index),
-//                     Some(idx) => debug_struct.field("query_index", &idx),
-//                 };
-//                 debug_struct
-//                     .field("column_index", &query.column_index)
-//                     .field("rotation", &query.rotation)
-//                     .finish()
-//             }
-//             Expr::Advice(query) => {
-//                 let mut debug_struct = f.debug_struct("Advice");
-//                 match query.index {
-//                     None => debug_struct.field("query_index", &query.index),
-//                     Some(idx) => debug_struct.field("query_index", &idx),
-//                 };
-//                 debug_struct
-//                     .field("column_index", &query.column_index)
-//                     .field("rotation", &query.rotation);
-//                 // Only show advice's phase if it's not in first phase.
-//                 // if query.phase != FirstPhase.to_sealed() {
-//                 //     debug_struct.field("phase", &query.phase);
-//                 // }
-//                 debug_struct.finish()
-//             }
-//             Expr::Instance(query) => {
-//                 let mut debug_struct = f.debug_struct("Instance");
-//                 match query.index {
-//                     None => debug_struct.field("query_index", &query.index),
-//                     Some(idx) => debug_struct.field("query_index", &idx),
-//                 };
-//                 debug_struct
-//                     .field("column_index", &query.column_index)
-//                     .field("rotation", &query.rotation)
-//                     .finish()
-//             }
-//             Expr::Challenge(_, power) => f.debug_tuple("Challenge").field(power).finish(),
-//             Expr::Negated(poly) => f.debug_tuple("Negated").field(poly).finish(),
-//             Expr::Sum(a, b) => f.debug_tuple("Sum").field(a).field(b).finish(),
-//             Expr::Product(a, b) => f.debug_tuple("Product").field(a).field(b).finish(),
-//             Expr::Scaled(poly, scalar) => {
-//                 f.debug_tuple("Scaled").field(poly).field(scalar).finish()
-//             }
-//         }
-//     }
-// }
+impl<F: std::fmt::Debug + Field> std::fmt::Debug for Expr<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::Slack(d) => f.debug_tuple("Slack").field(d).finish(),
+            Expr::Constant(scalar) => f.debug_tuple("Constant").field(scalar).finish(),
+            Expr::Selector(selector) => f.debug_tuple("Selector").field(selector).finish(),
+            // Skip enum variant and print query struct directly to maintain backwards compatibility.
+            Expr::Fixed(query) => f.debug_tuple("Fixed").field(query).finish(),
+            Expr::Advice(query) => f.debug_tuple("Advice").field(query).finish(),
+            Expr::Instance(query) => f.debug_tuple("Instance").field(query).finish(),
+            Expr::Challenge(c, power) => f.debug_tuple("Challenge").field(c).field(power).finish(),
+            Expr::Negated(poly) => f.debug_tuple("Negated").field(poly).finish(),
+            Expr::Sum(a, b) => f.debug_tuple("Sum").field(a).field(b).finish(),
+            Expr::Product(a, b) => f.debug_tuple("Product").field(a).field(b).finish(),
+            Expr::Scaled(poly, scalar) => {
+                f.debug_tuple("Scaled").field(poly).field(scalar).finish()
+            }
+        }
+    }
+}
 
 // #[cfg(test)]
 

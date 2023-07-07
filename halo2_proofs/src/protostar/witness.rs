@@ -20,10 +20,11 @@ use group::{prime::PrimeCurveAffine, Curve};
 use rand_core::RngCore;
 use std::{
     collections::{BTreeSet, HashMap},
+    iter::zip,
     ops::RangeTo,
 };
 
-///
+/// Cache for storing the evaluated witness data during all phases of the advice generation.
 struct WitnessCollection<'a, F: Field> {
     k: u32,
     current_phase: sealed::Phase,
@@ -67,7 +68,8 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
         // Do nothing
     }
 
-    fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
+    fn query_instance(&mut self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
+        // TODO(@adr1anh): Compare with actual length of the instance column
         if !self.usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
         }
@@ -98,6 +100,7 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
             return Ok(());
         }
 
+        // TODO(@adr1anh): Compare with actual length of the advice column
         if !self.usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
         }
@@ -165,6 +168,7 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
     }
 }
 
+/// Generates `Polynomial`s from given `instance` values, and adds them to the transcript.
 pub fn create_instance_polys<
     Scheme: CommitmentScheme,
     E: EncodedChallenge<Scheme::Curve>,
@@ -175,24 +179,25 @@ pub fn create_instance_polys<
     instances: &[&[Scheme::Scalar]],
     transcript: &mut T,
 ) -> Result<Vec<Polynomial<Scheme::Scalar, LagrangeCoeff>>, Error> {
+    // TODO(@adr1anh): Check that the lengths of each instance column is correct as well
     if instances.len() != cs.num_instance_columns {
         return Err(Error::InvalidInstances);
     }
     let n = params.n() as usize;
 
-    // TODO(@adr1anh): refactor into own function
     // generate polys for instance columns
     // NOTE(@adr1anh): In the case where the verifier does not query the instance,
     // we do not need to create a Lagrange polynomial of size n.
     let instance_polys = instances
         .iter()
         .map(|values| {
+            // TODO(@adr1anh): Allocate only the required size for each column
             let mut poly = empty_lagrange(n);
 
             if values.len() > (poly.len() - (cs.blinding_factors() + 1)) {
                 return Err(Error::InstanceTooLarge);
             }
-            for (poly, value) in poly.iter_mut().zip(values.iter()) {
+            for (poly, value) in zip(poly.iter_mut(), values.iter()) {
                 // The instance is part of the transcript
                 // if !P::QUERY_INSTANCE {
                 //     transcript.common_scalar(*value)?;
@@ -204,6 +209,7 @@ pub fn create_instance_polys<
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    // TODO(@adr1anh): Split into two functions for handling both committed and raw instance columns
     // // For large instances, we send a commitment to it and open it with PCS
     // if P::QUERY_INSTANCE {
     //     let instance_commitments_projective: Vec<_> = instance_polys
@@ -247,13 +253,14 @@ pub fn create_advice_transcript<
     params: &Scheme::ParamsProver,
     cs: &ConstraintSystem<Scheme::Scalar>,
     circuit: &ConcreteCircuit,
-    // raw instance columns
     instances: &[&[Scheme::Scalar]],
     mut rng: R,
     transcript: &mut T,
 ) -> Result<AdviceTranscript<Scheme::Scalar>, Error> {
     let n = params.n() as usize;
 
+    // TODO(@adr1anh): Can we cache the config in the `circuit_data`?
+    // We don't apply selector optimization so it should remain the same as during the keygen.
     let config = {
         let mut meta = ConstraintSystem::default();
 
@@ -264,12 +271,11 @@ pub fn create_advice_transcript<
         config
     };
 
-    // Selector optimizations cannot be applied here; use the ConstraintSystem
-    // from the verification key.
     let meta = &cs;
 
     // Synthesize the circuit over multiple iterations
     let (advice_polys, advice_blinds, challenges) = {
+        // TODO(@adr1anh): Use `circuit_data.num_advice_rows` to only allocate required number of rows
         let mut advice_assigned = vec![empty_lagrange_assigned(n); meta.num_advice_columns];
         let mut advice_polys = vec![empty_lagrange(n); meta.num_advice_columns];
         let mut advice_blinds = vec![Blind::default(); meta.num_advice_columns];

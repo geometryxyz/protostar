@@ -19,7 +19,7 @@ use crate::{
 };
 use ff::{BatchInvert, FromUniformBytes};
 use rand_core::{OsRng, RngCore};
-use std::iter;
+use std::iter::{self, zip};
 
 fn rand_2d_array<F: Field, R: RngCore, const W: usize, const H: usize>(rng: &mut R) -> [[F; H]; W] {
     [(); W].map(|_| [(); H].map(|_| F::random(&mut *rng)))
@@ -50,6 +50,7 @@ pub struct MyConfig<const W: usize> {
     shuffled: [Column<Advice>; W],
     theta: Challenge,
     gamma: Challenge,
+    gamma2: Challenge,
     z: Column<Advice>,
 }
 
@@ -59,7 +60,7 @@ impl<const W: usize> MyConfig<W> {
         // First phase
         let original = [(); W].map(|_| meta.advice_column_in(FirstPhase));
         let shuffled = [(); W].map(|_| meta.advice_column_in(FirstPhase));
-        let [theta, gamma] = [(); 2].map(|_| meta.challenge_usable_after(FirstPhase));
+        let [theta, gamma, gamma2] = [(); 3].map(|_| meta.challenge_usable_after(FirstPhase));
         // Second phase
         let z = meta.advice_column_in(SecondPhase);
 
@@ -79,7 +80,7 @@ impl<const W: usize> MyConfig<W> {
             let q_shuffle = q_shuffle.expr();
             let original = original.map(|advice| advice.cur());
             let shuffled = shuffled.map(|advice| advice.cur());
-            let [theta, gamma] = [theta, gamma].map(|challenge| challenge.expr());
+            let [theta, gamma, gamma2] = [theta, gamma, gamma2].map(|challenge| challenge.expr());
 
             // Compress
             let original = original
@@ -93,7 +94,11 @@ impl<const W: usize> MyConfig<W> {
                 .reduce(|acc, a| acc * theta.clone() + a)
                 .unwrap();
 
-            vec![q_shuffle * (z.cur() * (original + gamma.clone()) - z.next() * (shuffled + gamma))]
+            vec![
+                q_shuffle
+                    * (z.cur() * (original + gamma.clone() * gamma2.clone())
+                        - z.next() * (shuffled + gamma * gamma2)),
+            ]
         });
 
         Self {
@@ -104,6 +109,7 @@ impl<const W: usize> MyConfig<W> {
             shuffled,
             theta,
             gamma,
+            gamma2,
             z,
         }
     }
@@ -160,11 +166,11 @@ impl<F: Field, const W: usize, const H: usize> Circuit<F> for MyCircuit<F, W, H>
                 }
 
                 // First phase
-                for (idx, (&column, values)) in config
-                    .original
-                    .iter()
-                    .zip(self.original.transpose_array().iter())
-                    .enumerate()
+                for (idx, (&column, values)) in zip(
+                    config.original.iter(),
+                    self.original.transpose_array().iter(),
+                )
+                .enumerate()
                 {
                     for (offset, &value) in values.transpose_array().iter().enumerate() {
                         region.assign_advice(
@@ -175,11 +181,11 @@ impl<F: Field, const W: usize, const H: usize> Circuit<F> for MyCircuit<F, W, H>
                         )?;
                     }
                 }
-                for (idx, (&column, values)) in config
-                    .shuffled
-                    .iter()
-                    .zip(self.shuffled.transpose_array().iter())
-                    .enumerate()
+                for (idx, (&column, values)) in zip(
+                    config.shuffled.iter(),
+                    self.shuffled.transpose_array().iter(),
+                )
+                .enumerate()
                 {
                     for (offset, &value) in values.transpose_array().iter().enumerate() {
                         region.assign_advice(
