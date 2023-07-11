@@ -21,10 +21,12 @@ use ff::{BatchInvert, FromUniformBytes};
 use rand_core::{OsRng, RngCore};
 use std::iter::{self, zip};
 
+/// generate a random 2d array of field elements of size W x H
 fn rand_2d_array<F: Field, R: RngCore, const W: usize, const H: usize>(rng: &mut R) -> [[F; H]; W] {
     [(); W].map(|_| [(); H].map(|_| F::random(&mut *rng)))
 }
 
+/// randomly permute the columns 2d array `original`
 fn shuffled<F: Field, R: RngCore, const W: usize, const H: usize>(
     original: [[F; H]; W],
     rng: &mut R,

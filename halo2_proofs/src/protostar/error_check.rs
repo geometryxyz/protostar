@@ -436,15 +436,21 @@ pub fn evaluated_challenge_powers<F: Field>(
 }
 
 /// Computes [1, v, v^2, ..., v^max_degee]
-fn powers_of<F: Field>(v: &F, max_degee: usize) -> Vec<F> {
-    let mut powers = Vec::with_capacity(max_degee + 1);
-    let mut acc = F::ONE;
-    powers.push(acc);
+fn powers_of<F: Field>(v: &F, max_degree: usize) -> Vec<F> {
+    std::iter::successors(Some(F::ONE), |&n| Some(n * v))
+        // we need max_degee + 1 since we include v^0 = 1
+        .take(max_degree + 1)
+        .collect()
+}
 
-    // we need max_degee + 1 since we include v^0 = 1
-    for _i in 1..max_degee + 1 {
-        acc *= v;
-        powers.push(acc);
+#[cfg(test)]
+mod test{
+    use super::*;
+    use crate::{halo2curves::pasta::Fp, plonk::sealed::SealedPhase};
+    #[test]
+    fn test_powers_of(){
+        let v = Fp::from(2u64);
+        let expect: Vec<Fp> = [1,2,4,8,16,32].into_iter().map(Fp::from).collect();
+        assert_eq!(expect, powers_of(&v, 5));
     }
-    powers
 }
