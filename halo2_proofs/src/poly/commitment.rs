@@ -221,6 +221,14 @@ impl<F: Field> Mul for Blind<F> {
     }
 }
 
+impl<F: Field> Mul<F> for Blind<F> {
+    type Output = Self;
+
+    fn mul(self, rhs: F) -> Self {
+        Blind(self.0 * rhs)
+    }
+}
+
 impl<F: Field> AddAssign for Blind<F> {
     fn add_assign(&mut self, rhs: Blind<F>) {
         self.0 += rhs.0;

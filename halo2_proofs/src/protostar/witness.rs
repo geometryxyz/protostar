@@ -236,6 +236,7 @@ pub fn create_instance_polys<
 /// the IOP protocol.
 pub struct AdviceTranscript<F: Field> {
     pub challenges: Vec<F>,
+    // TODO(@adr1anh): save commitments too
     pub advice_polys: Vec<Polynomial<F, LagrangeCoeff>>,
     // blinding values for advice_polys, same length as advice_polys
     pub advice_blinds: Vec<Blind<F>>,

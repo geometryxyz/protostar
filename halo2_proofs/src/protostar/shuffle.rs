@@ -50,7 +50,6 @@ pub struct MyConfig<const W: usize> {
     shuffled: [Column<Advice>; W],
     theta: Challenge,
     gamma: Challenge,
-    gamma2: Challenge,
     z: Column<Advice>,
 }
 
@@ -60,27 +59,27 @@ impl<const W: usize> MyConfig<W> {
         // First phase
         let original = [(); W].map(|_| meta.advice_column_in(FirstPhase));
         let shuffled = [(); W].map(|_| meta.advice_column_in(FirstPhase));
-        let [theta, gamma, gamma2] = [(); 3].map(|_| meta.challenge_usable_after(FirstPhase));
+        let [theta, gamma] = [(); 2].map(|_| meta.challenge_usable_after(FirstPhase));
         // Second phase
         let z = meta.advice_column_in(SecondPhase);
 
         meta.create_gate("z should start with 1", |_| {
             let one = Expression::Constant(F::ONE);
 
-            vec![q_first.expr() * (one - z.cur())]
+            vec![q_first.expr() * ((one.clone() - z.cur()) * (one - z.cur()))]
         });
 
         meta.create_gate("z should end with 1", |_| {
             let one = Expression::Constant(F::ONE);
 
-            vec![q_last.expr() * (one - z.cur())]
+            vec![q_last.expr() * ((one.clone() - z.cur()) * (one - z.cur()))]
         });
 
         meta.create_gate("z should have valid transition", |_| {
             let q_shuffle = q_shuffle.expr();
             let original = original.map(|advice| advice.cur());
             let shuffled = shuffled.map(|advice| advice.cur());
-            let [theta, gamma, gamma2] = [theta, gamma, gamma2].map(|challenge| challenge.expr());
+            let [theta, gamma] = [theta, gamma].map(|challenge| challenge.expr());
 
             // Compress
             let original = original
@@ -96,8 +95,8 @@ impl<const W: usize> MyConfig<W> {
 
             vec![
                 q_shuffle
-                    * (z.cur() * (original + gamma.clone() * gamma2.clone())
-                        - z.next() * (shuffled + gamma * gamma2)),
+                    * (z.cur() * (original.clone() * original + gamma.clone())
+                        - z.next() * (shuffled.clone() * shuffled + gamma)),
             ]
         });
 
@@ -109,7 +108,6 @@ impl<const W: usize> MyConfig<W> {
             shuffled,
             theta,
             gamma,
-            gamma2,
             z,
         }
     }
@@ -208,7 +206,7 @@ impl<F: Field, const W: usize, const H: usize> Circuit<F> for MyCircuit<F, W, H>
                                 compressed += value[idx];
                             }
 
-                            *product = compressed + gamma
+                            *product = compressed * compressed + gamma;
                         }
 
                         product.iter_mut().batch_invert();
@@ -220,7 +218,7 @@ impl<F: Field, const W: usize, const H: usize> Circuit<F> for MyCircuit<F, W, H>
                                 compressed += value[idx];
                             }
 
-                            *product *= compressed + gamma
+                            *product *= compressed * compressed + gamma;
                         }
 
                         #[allow(clippy::let_and_return)]

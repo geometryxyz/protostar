@@ -7,8 +7,6 @@ use crate::{
     poly::Rotation,
 };
 
-use super::keygen::CircuitData;
-
 /// A Protostar gate augments the structure of a plonk::Gate to allow for more efficient evaluation.
 #[derive(Clone)]
 pub struct Gate<F: Field> {
@@ -28,49 +26,6 @@ pub struct Gate<F: Field> {
     pub(super) queried_advice: Vec<AdviceQuery>,
 }
 
-/// Undo `Constraints::WithSelector` and return the common top-level `Selector` along with the expressions it selects.
-/// If no simple `Selector` is found, returns the original list of polynomials.
-fn extract_simple_selector<F: Field>(
-    original_polys: &[Expression<F>],
-) -> (Vec<Expression<F>>, Option<Selector>) {
-    let (mut polys, simple_selectors): (Vec<_>, Vec<_>) = original_polys
-        .iter()
-        .map(|poly| {
-            // Check whether the top node is a multiplication by a selector
-            let (simple_selector, poly) = match poly {
-                // If the whole polynomial is multiplied by a simple selector,
-                // return it along with the expression it selects
-                Expression::Product(e1, e2) => match (&**e1, &**e2) {
-                    (Expression::Selector(s), e) | (e, Expression::Selector(s)) => (Some(*s), e),
-                    _ => (None, poly),
-                },
-                _ => (None, poly),
-            };
-            (poly.clone(), simple_selector)
-        })
-        .unzip();
-
-    // Check if all simple selectors are the same and if so select it
-    let potential_selector = match simple_selectors.as_slice() {
-        [head, tail @ ..] => {
-            if let Some(s) = *head {
-                tail.iter().all(|x| x.is_some_and(|x| s == x)).then(|| s)
-            } else {
-                None
-            }
-        }
-        [] => None,
-    };
-
-    // if we haven't found a common simple selector, then we just use the previous polys
-    if potential_selector.is_none() {
-        polys.clear();
-        polys.extend_from_slice(original_polys);
-    }
-
-    (polys, potential_selector)
-}
-
 impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
     /// Create an augmented Protostar gate from a `plonk::Gate`.
     /// - Extract the common top-level `Selector` if it exists
@@ -85,7 +40,7 @@ impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
         let mut advice = BTreeSet::<AdviceQuery>::new();
 
         // Recover common simple `Selector` from the `Gate`, along with the branch `Expression`s  it selects
-        let (polys, simple_selector) = extract_simple_selector(cs_gate.polynomials());
+        let (polys, simple_selector) = cs_gate.extract_simple_selector();
 
         // Collect all common queries for the set of polynomials in `gate`
         for poly in polys.iter() {

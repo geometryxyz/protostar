@@ -527,6 +527,10 @@ pub(crate) fn powers<F: Field>(base: F) -> impl Iterator<Item = F> {
     std::iter::successors(Some(F::ONE), move |power| Some(base * power))
 }
 
+pub(crate) fn field_integers<F: Field>() -> impl Iterator<Item = F> {
+    std::iter::successors(Some(F::ZERO), |acc| Some(*acc + F::ONE))
+}
+
 #[cfg(test)]
 use rand_core::OsRng;
 

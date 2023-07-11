@@ -1,3 +1,4 @@
+use core::num;
 use std::{collections::BTreeSet, ops::Range};
 
 use super::gate::{Expr, Gate};
@@ -19,21 +20,22 @@ use crate::{
 
 /// CircuitData is the minimal algebraic representation of a PlonK-ish circuit.
 /// From this, we can derive the Proving/Verification keys for a chosen proof system.
-pub struct CircuitData<F: Field> {
+pub struct ProvingKey<F: Field> {
     // maximum number of rows in the trace
-    pub n: usize,
-    // ceil(log(n))
-    pub k: u32,
+    num_rows: usize,
     // max active rows, without blinding
     pub usable_rows: Range<usize>,
     // original constraint system
-    pub cs: ConstraintSystem<F>,
+    cs: ConstraintSystem<F>,
+
+    // gates transformed from cs
+    gates: Vec<Gate<F>>,
 
     // actual number of elements in each column for each column type.
-    pub num_selector_rows: Vec<usize>,
-    pub num_fixed_rows: Vec<usize>,
-    pub num_advice_rows: Vec<usize>,
-    pub num_instance_rows: Vec<usize>,
+    num_selector_rows: Vec<usize>,
+    num_fixed_rows: Vec<usize>,
+    num_advice_rows: Vec<usize>,
+    num_instance_rows: Vec<usize>,
 
     // fixed[fixed_col][row]
     pub fixed: Vec<Polynomial<F, LagrangeCoeff>>,
@@ -48,12 +50,12 @@ pub struct CircuitData<F: Field> {
     // lookups?
 }
 
-impl<F: Field> CircuitData<F> {
+impl<F: Field> ProvingKey<F> {
     /// Generate algebraic representation of the circuit.
     pub fn new<ConcreteCircuit>(
-        n: usize,
+        num_rows: usize,
         circuit: &ConcreteCircuit,
-    ) -> Result<CircuitData<F>, Error>
+    ) -> Result<ProvingKey<F>, Error>
     where
         ConcreteCircuit: Circuit<F>,
     {
@@ -65,21 +67,23 @@ impl<F: Field> CircuitData<F> {
         let config = ConcreteCircuit::configure(&mut cs);
 
         let cs = cs;
-        let k = n.next_power_of_two() as u32;
+        // let k = n.next_power_of_two() as u32;
 
         // TODO(@adr1anh): Blinding will be different for Protostar
-        if n < cs.minimum_rows() {
-            return Err(Error::not_enough_rows_available(k));
-        }
+        // if n < cs.minimum_rows() {
+        //     return Err(Error::not_enough_rows_available(k));
+        // }
 
         let mut assembly: Assembly<F> = Assembly {
-            k,
-            fixed: vec![empty_lagrange_assigned(n); cs.num_fixed_columns],
-            permutation: permutation::keygen::Assembly::new(n, &cs.permutation),
-            selectors: vec![vec![false; n]; cs.num_selectors],
+            num_rows,
             // We don't need blinding factors for Protostar, but later for the Decider,
             // leave for now
-            usable_rows: 0..n,
+            usable_rows: 0..num_rows,
+            k: num_rows.next_power_of_two() as u32,
+
+            fixed: vec![empty_lagrange_assigned(num_rows); cs.num_fixed_columns],
+            permutation: permutation::keygen::Assembly::new(num_rows, &cs.permutation),
+            selectors: vec![vec![false; num_rows]; cs.num_selectors],
 
             num_selector_rows: vec![0; cs.num_selectors],
             num_fixed_rows: vec![0; cs.num_fixed_columns],
@@ -108,13 +112,18 @@ impl<F: Field> CircuitData<F> {
         //         .map(|poly| domain.lagrange_from_vec(poly)),
         // );
 
-        let permutations = assembly.permutation.build_permutations(n, &cs.permutation);
+        let permutations = assembly
+            .permutation
+            .build_permutations(num_rows, &cs.permutation);
 
-        Ok(CircuitData {
-            n,
-            k,
+        let gates: Vec<Gate<_>> = cs.gates().iter().map(Gate::from).collect();
+
+        Ok(ProvingKey {
+            num_rows,
+            // k,
             usable_rows: assembly.usable_rows,
             cs,
+            gates,
             fixed,
             selectors: assembly.selectors,
             permutations,
@@ -123,6 +132,79 @@ impl<F: Field> CircuitData<F> {
             num_advice_rows: assembly.num_advice_rows,
             num_instance_rows: assembly.num_instance_rows,
         })
+    }
+
+    pub fn max_degree(&self) -> usize {
+        *self
+            .gates
+            .iter()
+            .map(|g| g.degrees.iter().max().unwrap())
+            .max()
+            .unwrap()
+    }
+
+    pub fn cs(&self) -> &ConstraintSystem<F> {
+        &self.cs
+    }
+
+    pub fn num_challenges(&self) -> usize {
+        self.cs.num_challenges()
+    }
+    pub fn num_instance_columns(&self) -> usize {
+        self.cs.num_instance_columns()
+    }
+    pub fn num_instance_rows(&self) -> &[usize] {
+        &self.num_instance_rows
+    }
+    pub fn num_advice_columns(&self) -> usize {
+        self.cs.num_advice_columns()
+    }
+    pub fn num_advice_rows(&self) -> &[usize] {
+        &self.num_advice_rows
+    }
+    pub fn num_fixed_columns(&self) -> usize {
+        self.cs.num_fixed_columns()
+    }
+    pub fn num_fixed_rows(&self) -> &[usize] {
+        &self.num_fixed_rows
+    }
+    pub fn num_selectors(&self) -> usize {
+        self.cs.num_selectors()
+    }
+
+    pub fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+
+    pub fn sqrt_num_rows(&self) -> usize {
+        let k = self.num_rows.next_power_of_two();
+        // if k is odd, add 1, and divide by 2
+        (k + (k % 2)) >> 1
+    }
+
+    pub fn max_challenge_powers(&self) -> Vec<usize> {
+        // for each challenge, find the maximum power of it appearing across all expressions
+        let mut max_challenge_power = vec![0; self.num_challenges()];
+        for gate in self.gates.iter() {
+            for poly in gate.polys.iter() {
+                poly.traverse(&mut |v| {
+                    if let Expr::Challenge(c, d) = v {
+                        max_challenge_power[*c] = std::cmp::max(max_challenge_power[*c], *d);
+                    }
+                });
+            }
+        }
+        max_challenge_power
+    }
+
+    pub fn gates(&self) -> &[Gate<F>] {
+        &self.gates
+    }
+
+    pub fn num_constraints(&self) -> usize {
+        self.gates
+            .iter()
+            .fold(0, |acc, gate| acc + gate.polys.len())
     }
 }
 
@@ -147,12 +229,16 @@ impl<F: Field> CircuitData<F> {
 /// Assembly to be used in circuit synthesis.
 #[derive(Debug)]
 struct Assembly<F: Field> {
+    // A range of available rows for assignment and copies.
+    num_rows: usize,
+    usable_rows: Range<usize>,
+    // TODO(@adr1anh): Only needed for the Error, remove later
     k: u32,
+
     fixed: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
     permutation: permutation::keygen::Assembly,
+    // TODO(@adr1anh): Replace with Vec<BTreeSet<bool>>
     selectors: Vec<Vec<bool>>,
-    // A range of available rows for assignment and copies.
-    usable_rows: Range<usize>,
 
     // keep track of actual number of elements in each column
     num_selector_rows: Vec<usize>,
@@ -183,7 +269,8 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        self.num_selector_rows[selector.0] = std::cmp::max(self.num_selector_rows[selector.0], row);
+        self.num_selector_rows[selector.0] =
+            std::cmp::max(self.num_selector_rows[selector.0] + 1, row);
 
         if !self.usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
@@ -197,7 +284,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
     fn query_instance(&mut self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
         let column_index = column.index();
         self.num_instance_rows[column_index] =
-            std::cmp::max(self.num_instance_rows[column_index], row);
+            std::cmp::max(self.num_instance_rows[column_index] + 1, row);
         if !self.usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
         }
@@ -220,7 +307,8 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         AR: Into<String>,
     {
         let column_index = column.index();
-        self.num_advice_rows[column_index] = std::cmp::max(self.num_advice_rows[column_index], row);
+        self.num_advice_rows[column_index] =
+            std::cmp::max(self.num_advice_rows[column_index] + 1, row);
         // We only care about fixed columns here
         Ok(())
     }
@@ -239,7 +327,8 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         AR: Into<String>,
     {
         let column_index = column.index();
-        self.num_fixed_rows[column_index] = std::cmp::max(self.num_fixed_rows[column_index], row);
+        self.num_fixed_rows[column_index] =
+            std::cmp::max(self.num_fixed_rows[column_index] + 1, row);
 
         if !self.usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
@@ -267,29 +356,29 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         match left_column.column_type() {
             Any::Advice(_) => {
                 self.num_advice_rows[left_column_index] =
-                    std::cmp::max(self.num_advice_rows[left_column_index], left_row);
+                    std::cmp::max(self.num_advice_rows[left_column_index], left_row + 1);
             }
             Any::Fixed => {
                 self.num_fixed_rows[left_column_index] =
-                    std::cmp::max(self.num_fixed_rows[left_column_index], left_row);
+                    std::cmp::max(self.num_fixed_rows[left_column_index], left_row + 1);
             }
             Any::Instance => {
                 self.num_instance_rows[left_column_index] =
-                    std::cmp::max(self.num_instance_rows[left_column_index], left_row);
+                    std::cmp::max(self.num_instance_rows[left_column_index], left_row + 1);
             }
         }
         match right_column.column_type() {
             Any::Advice(_) => {
                 self.num_advice_rows[right_column_index] =
-                    std::cmp::max(self.num_advice_rows[right_column_index], right_row);
+                    std::cmp::max(self.num_advice_rows[right_column_index], right_row + 1);
             }
             Any::Fixed => {
                 self.num_fixed_rows[right_column_index] =
-                    std::cmp::max(self.num_fixed_rows[right_column_index], right_row);
+                    std::cmp::max(self.num_fixed_rows[right_column_index], right_row + 1);
             }
             Any::Instance => {
                 self.num_instance_rows[right_column_index] =
-                    std::cmp::max(self.num_instance_rows[right_column_index], right_row);
+                    std::cmp::max(self.num_instance_rows[right_column_index], right_row + 1);
             }
         }
 
@@ -353,45 +442,24 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 //     _phantom: PhantomData<C>,
 // }
 
-/// A Protostar proving key that augments `CircuitData`
-pub struct ProvingKey<'cd, F: Field> {
-    pub circuit_data: &'cd CircuitData<F>,
-    pub gates: Vec<Gate<F>>,
-    pub max_degree: usize,
-    pub max_challenge_power: Vec<usize>,
-    // vk: VerifyingKey<C>,
-    // ev etc?
-}
+// /// A Protostar proving key that augments `CircuitData`
+// pub struct ProvingKey<'cd, F: Field> {
+//     circuit_data: &'cd CircuitData<F>,
+//     pub gates: Vec<Gate<F>>,
+//     pub max_challenge_power: Vec<usize>,
+//     // vk: VerifyingKey<C>,
+//     // ev etc?
+// }
 
-impl<'cd, F: Field> ProvingKey<'cd, F> {
-    pub fn new(circuit_data: &'cd CircuitData<F>) -> Result<ProvingKey<'cd, F>, Error> {
-        let gates: Vec<Gate<_>> = circuit_data.cs.gates().iter().map(Gate::from).collect();
-
-        // for each challenge, find the maximum power of it appearing across all expressions
-        let mut max_challenge_power = vec![0; circuit_data.cs.num_challenges];
-        for gate in gates.iter() {
-            for poly in gate.polys.iter() {
-                poly.traverse(&mut |v| {
-                    if let Expr::Challenge(c, d) = v {
-                        max_challenge_power[*c] = std::cmp::max(max_challenge_power[*c], *d);
-                    }
-                });
-            }
-        }
-
-        let max_degree = *gates
-            .iter()
-            .map(|g| g.degrees.iter().max().unwrap())
-            .max()
-            .unwrap();
-        // let vk = VerifyingKey {
-        //     _phantom: Default::default(),
-        // };
-        Ok(ProvingKey {
-            circuit_data,
-            gates,
-            max_degree,
-            max_challenge_power,
-        })
-    }
-}
+// impl<'cd, F: Field> ProvingKey<'cd, F> {
+//     pub fn new(circuit_data: &'cd CircuitData<F>) -> Result<ProvingKey<'cd, F>, Error> {
+//         // let vk = VerifyingKey {
+//         //     _phantom: Default::default(),
+//         // };
+//         Ok(ProvingKey {
+//             circuit_data,
+//             gates,
+//             max_challenge_power,
+//         })
+//     }
+// }
