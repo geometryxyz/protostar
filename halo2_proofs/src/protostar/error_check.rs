@@ -139,10 +139,10 @@ impl<F: Field> Accumulator<F> {
             }
             final_poly
         };
-        // let expected_error_acc = final_poly.first().unwrap();
+        let expected_error_acc = final_poly.first().unwrap();
         let expected_error_new = final_poly.last().unwrap();
 
-        // assert_eq!(*expected_error_acc, self.instance.error);
+        assert_eq!(*expected_error_acc, self.instance.error);
         assert_eq!(*expected_error_new, new.instance.error);
         // TODO(@adr1anh): Commit to `final_poly` but ignore first and last coefficient
         // The first one is equal to the error of `self`
@@ -151,14 +151,16 @@ impl<F: Field> Accumulator<F> {
         // TODO(@adr1anh): Get alpha challenge from transcript
         let alpha = F::ONE;
 
-        self = self.linear_combination(new, alpha);
+        self = self.linear_combination(new, alpha, &final_poly);
         // assert!(!final_poly.last().unwrap().is_zero_vartime());
         self
     }
 
     // TODO(@adr1anh) no discard
-    fn linear_combination(mut self, new: Accumulator<F>, alpha: F) -> Self {
-        self.instance = self.instance.linear_combination(new.instance, alpha);
+    fn linear_combination(mut self, new: Accumulator<F>, alpha: F, final_poly: &[F]) -> Self {
+        self.instance = self
+            .instance
+            .linear_combination(new.instance, alpha, final_poly);
         self.witness = self.witness.linear_combination(new.witness, alpha);
         self
     }
@@ -246,12 +248,22 @@ impl<F: Field> AccumulatorInstance<F> {
     }
 
     // TODO(@adr1anh) no discard
-    fn linear_combination(mut self, new: AccumulatorInstance<F>, alpha: F) -> Self {
+    fn linear_combination(
+        mut self,
+        new: AccumulatorInstance<F>,
+        alpha: F,
+        final_poly: &[F],
+    ) -> Self {
         // TODO(@adr1anh): sanity checks for same size
         self.slack += alpha * new.slack;
         self.beta += alpha * new.beta;
         self.beta_sqrt += alpha * new.beta_sqrt;
-        self.error += alpha * new.error;
+        assert_eq!(final_poly[0], self.error);
+        self.error = F::ZERO;
+        for coeff in final_poly.iter().rev() {
+            self.error *= alpha;
+            self.error += coeff;
+        }
 
         for (acc_challenge, new_challenge) in zip(
             self.challenges.iter_mut().flat_map(|c| c.iter_mut()),
