@@ -21,7 +21,7 @@ use super::{
     witness::{create_advice_transcript, create_instance_polys},
 };
 
-///
+/// TODO(@adr1anh): This creates an accumulator actually
 fn create_proof<
     Scheme: CommitmentScheme,
     E: EncodedChallenge<Scheme::Curve>,
@@ -55,7 +55,8 @@ where
         transcript,
     )?;
 
-    let n_sqrt = pk.sqrt_num_rows();
+    // Protostar specific IOP stuff
+    let n_sqrt = 1 << pk.log2_sqrt_num_rows();
     let beta = transcript.squeeze_challenge_scalar::<Scheme::Scalar>();
     let beta_sqrt = beta.pow_vartime([n_sqrt as u64]);
     // TODO(@adr1anh): Commit to beta vectors

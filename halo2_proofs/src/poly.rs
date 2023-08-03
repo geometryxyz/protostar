@@ -9,10 +9,10 @@ use crate::SerdeFormat;
 
 use ff::PrimeField;
 use group::ff::{BatchInvert, Field};
-use std::fmt::Debug;
 use std::io;
 use std::marker::PhantomData;
 use std::ops::{Add, Deref, DerefMut, Index, IndexMut, Mul, RangeFrom, RangeFull, Sub};
+use std::{fmt::Debug, iter::zip};
 
 /// Generic commitment scheme structures
 pub mod commitment;
@@ -143,6 +143,26 @@ impl<F, B> DerefMut for Polynomial<F, B> {
 }
 
 impl<F, B> Polynomial<F, B> {
+    pub fn boolean_linear_combination(eval0: &Self, eval1: &Self, alpha: F) -> Self
+    where
+        F: Field,
+        B: Basis,
+    {
+        assert_eq!(eval0.len(), eval1.len());
+        let mut result = Self {
+            values: vec![F::ZERO; eval0.len()],
+            _marker: PhantomData,
+        };
+        parallelize(&mut result.values, |res, start| {
+            for (res, (lhs, rhs)) in res.iter_mut().zip(zip(
+                eval0.values[start..].iter(),
+                eval1.values[start..].iter(),
+            )) {
+                *res = alpha * (*rhs - *lhs) + lhs;
+            }
+        });
+        result
+    }
     /// Iterate over the values, which are either in coefficient or evaluation
     /// form depending on the basis `B`.
     pub fn iter(&self) -> impl Iterator<Item = &F> {

@@ -6,6 +6,7 @@ use ff::Field;
 use halo2curves::CurveAffine;
 
 use crate::{
+    arithmetic::log2_ceil,
     circuit::{layouter::SyncDeps, Value},
     plonk::{
         circuit::FloorPlanner, permutation, Advice, AdviceQuery, Any, Assigned, Assignment,
@@ -176,8 +177,8 @@ impl<F: Field> ProvingKey<F> {
         self.num_rows
     }
 
-    pub fn sqrt_num_rows(&self) -> usize {
-        let k = self.num_rows.next_power_of_two();
+    pub fn log2_sqrt_num_rows(&self) -> u32 {
+        let k = log2_ceil(self.num_rows());
         // if k is odd, add 1, and divide by 2
         (k + (k % 2)) >> 1
     }

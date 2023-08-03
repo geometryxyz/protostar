@@ -74,7 +74,7 @@ impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
         let num_challenges = challenges.len();
 
         // get homogenized and degree-flattened expressions
-        let (polys, degrees): (Vec<_>, Vec<_>) = polys
+        let polys: Vec<_> = polys
             .iter()
             // convert Expression to Expr
             .map(|e| e.to_expr(&selectors, &fixed, &challenges, &instance, &advice))
@@ -84,9 +84,8 @@ impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
                     .into_iter()
                     .fold(e, |acc, c| acc.distribute_challenge(c, 0))
             })
-            // homogenize the expression by introducing slack variable, returning the degree too
-            .map(|e| e.homogenize())
-            .unzip();
+            .collect();
+        let degrees = polys.iter().map(|poly| poly.degree()).collect();
 
         Gate {
             polys,
@@ -104,8 +103,6 @@ impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
 /// Low-degree expression representing an identity that must hold over the committed columns.
 #[derive(Clone)]
 pub enum Expr<F> {
-    /// This is a slack variable whose purpose is to make the equation homogeneous.
-    Slack(usize),
     /// This is a constant polynomial
     Constant(F),
     /// This is a virtual selector
@@ -236,7 +233,7 @@ impl<F: Field> Expr<F> {
     /// Powers of challenges are counted as a degree-1 variable.
     fn degree(&self) -> usize {
         match self {
-            Expr::Slack(d) => *d,
+            // Expr::Slack(d) => *d,
             Expr::Constant(_) => 0,
             Expr::Selector(_) => 0,
             Expr::Fixed(_) => 0,
@@ -251,48 +248,48 @@ impl<F: Field> Expr<F> {
     }
 
     /// Homogenizes `self` using powers of `Expr::Slack`, also returning the new degree.
-    pub fn homogenize(self) -> (Expr<F>, usize) {
-        // TODO(@adr1anh): Test that this function idempotent
-        match self {
-            Expr::Negated(e) => {
-                let (e, d) = e.homogenize();
-                (Expr::Negated(e.into()), d)
-            }
-            Expr::Sum(e1, e2) => {
-                // Homogenize both branches
-                let (mut e1, d1) = e1.homogenize();
-                let (mut e2, d2) = e2.homogenize();
-                let d = std::cmp::max(d1, d2);
+    // pub fn homogenize(self) -> (Expr<F>, usize) {
+    //     // TODO(@adr1anh): Test that this function idempotent
+    //     match self {
+    //         Expr::Negated(e) => {
+    //             let (e, d) = e.homogenize();
+    //             (Expr::Negated(e.into()), d)
+    //         }
+    //         Expr::Sum(e1, e2) => {
+    //             // Homogenize both branches
+    //             let (mut e1, d1) = e1.homogenize();
+    //             let (mut e2, d2) = e2.homogenize();
+    //             let d = std::cmp::max(d1, d2);
 
-                // if either branch has a lesser homogeneous degree, multiply it by `Expr::Slack`
-                // so that both branches have the same degree `d`.
-                e1 = if d1 < d {
-                    Expr::Product(Expr::Slack(d - d1).into(), e1.into())
-                } else {
-                    e1
-                };
-                e2 = if d2 < d {
-                    Expr::Product(Expr::Slack(d - d2).into(), e2.into())
-                } else {
-                    e2
-                };
-                (Expr::Sum(e1.into(), e2.into()), d)
-            }
-            Expr::Product(e1, e2) => {
-                let (e1, d1) = e1.homogenize();
-                let (e2, d2) = e2.homogenize();
-                (Expr::Product(e1.into(), e2.into()), d1 + d2)
-            }
-            Expr::Scaled(e, v) => {
-                let (e, d) = e.homogenize();
-                (Expr::Scaled(e.into(), v), d)
-            }
-            v => {
-                let d = v.degree();
-                (v, d)
-            }
-        }
-    }
+    //             // if either branch has a lesser homogeneous degree, multiply it by `Expr::Slack`
+    //             // so that both branches have the same degree `d`.
+    //             e1 = if d1 < d {
+    //                 Expr::Product(Expr::Slack(d - d1).into(), e1.into())
+    //             } else {
+    //                 e1
+    //             };
+    //             e2 = if d2 < d {
+    //                 Expr::Product(Expr::Slack(d - d2).into(), e2.into())
+    //             } else {
+    //                 e2
+    //             };
+    //             (Expr::Sum(e1.into(), e2.into()), d)
+    //         }
+    //         Expr::Product(e1, e2) => {
+    //             let (e1, d1) = e1.homogenize();
+    //             let (e2, d2) = e2.homogenize();
+    //             (Expr::Product(e1.into(), e2.into()), d1 + d2)
+    //         }
+    //         Expr::Scaled(e, v) => {
+    //             let (e, d) = e.homogenize();
+    //             (Expr::Scaled(e.into(), v), d)
+    //         }
+    //         v => {
+    //             let d = v.degree();
+    //             (v, d)
+    //         }
+    //     }
+    // }
 
     /// If `self` is homogeneous, return the degree, else `None`
     fn homogeneous_degree(&self) -> Option<usize> {
@@ -324,7 +321,6 @@ impl<F: Field> Expr<F> {
     /// Evaluate the expression using closures for each node types.
     pub fn evaluate<T>(
         &self,
-        slack: &impl Fn(usize) -> T,
         constant: &impl Fn(F) -> T,
         selector_column: &impl Fn(usize) -> T,
         fixed_column: &impl Fn(usize) -> T,
@@ -337,7 +333,6 @@ impl<F: Field> Expr<F> {
         scaled: &impl Fn(T, F) -> T,
     ) -> T {
         match self {
-            Expr::Slack(d) => slack(*d),
             Expr::Constant(scalar) => constant(*scalar),
             Expr::Selector(selector) => selector_column(*selector),
             Expr::Fixed(query) => fixed_column(*query),
@@ -346,7 +341,6 @@ impl<F: Field> Expr<F> {
             Expr::Challenge(value, power) => challenge(*value, *power),
             Expr::Negated(a) => {
                 let a = a.evaluate(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -362,7 +356,6 @@ impl<F: Field> Expr<F> {
             }
             Expr::Sum(a, b) => {
                 let a = a.evaluate(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -375,7 +368,6 @@ impl<F: Field> Expr<F> {
                     scaled,
                 );
                 let b = b.evaluate(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -391,7 +383,6 @@ impl<F: Field> Expr<F> {
             }
             Expr::Product(a, b) => {
                 let a = a.evaluate(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -404,7 +395,6 @@ impl<F: Field> Expr<F> {
                     scaled,
                 );
                 let b = b.evaluate(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -420,7 +410,6 @@ impl<F: Field> Expr<F> {
             }
             Expr::Scaled(a, f) => {
                 let a = a.evaluate(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -440,7 +429,6 @@ impl<F: Field> Expr<F> {
     /// Approximate the computational complexity of this expression.
     pub fn complexity(&self) -> usize {
         match self {
-            Expr::Slack(_) => 1,
             Expr::Constant(_) => 0,
             // Selectors should always be evaluated first
             Expr::Selector(_) => 0,
@@ -459,7 +447,6 @@ impl<F: Field> Expr<F> {
     /// operations.
     pub fn evaluate_lazy<T: PartialEq>(
         &self,
-        slack: &impl Fn(usize) -> T,
         constant: &impl Fn(F) -> T,
         selector_column: &impl Fn(usize) -> T,
         fixed_column: &impl Fn(usize) -> T,
@@ -473,7 +460,6 @@ impl<F: Field> Expr<F> {
         zero: &T,
     ) -> T {
         match self {
-            Expr::Slack(power) => slack(*power),
             Expr::Constant(scalar) => constant(*scalar),
             Expr::Selector(selector) => selector_column(*selector),
             Expr::Fixed(query) => fixed_column(*query),
@@ -482,7 +468,6 @@ impl<F: Field> Expr<F> {
             Expr::Challenge(value, power) => challenge(*value, *power),
             Expr::Negated(a) => {
                 let a = a.evaluate_lazy(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -499,7 +484,6 @@ impl<F: Field> Expr<F> {
             }
             Expr::Sum(a, b) => {
                 let a = a.evaluate_lazy(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -513,7 +497,6 @@ impl<F: Field> Expr<F> {
                     zero,
                 );
                 let b = b.evaluate_lazy(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -535,7 +518,6 @@ impl<F: Field> Expr<F> {
                     (b, a)
                 };
                 let a = a.evaluate_lazy(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -553,7 +535,6 @@ impl<F: Field> Expr<F> {
                     a
                 } else {
                     let b = b.evaluate_lazy(
-                        slack,
                         constant,
                         selector_column,
                         fixed_column,
@@ -571,7 +552,6 @@ impl<F: Field> Expr<F> {
             }
             Expr::Scaled(a, f) => {
                 let a = a.evaluate_lazy(
-                    slack,
                     constant,
                     selector_column,
                     fixed_column,
@@ -610,7 +590,6 @@ impl<F: Field> Expr<F> {
     /// returns the maximum power for this challenge appearing in the expression.
     pub fn max_challenge_power(&self, challenge_idx: usize) -> usize {
         match self {
-            Expr::Slack(_) => 0,
             Expr::Constant(_) => 0,
             Expr::Selector(_) => 0,
             Expr::Fixed(_) => 0,
@@ -640,7 +619,6 @@ impl<F: Field> Expr<F> {
 impl<F: std::fmt::Debug + Field> std::fmt::Debug for Expr<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Expr::Slack(d) => f.debug_tuple("Slack").field(d).finish(),
             Expr::Constant(scalar) => f.debug_tuple("Constant").field(scalar).finish(),
             Expr::Selector(selector) => f.debug_tuple("Selector").field(selector).finish(),
             // Skip enum variant and print query struct directly to maintain backwards compatibility.

@@ -433,12 +433,26 @@ pub fn parallelize<T: Send, F: Fn(&mut [T], usize) + Send + Sync + Clone>(v: &mu
     });
 }
 
-fn log2_floor(num: usize) -> u32 {
+/// Return the largest integer d such that 2ᵈ <= num
+pub fn log2_floor(num: usize) -> u32 {
     assert!(num > 0);
 
     let mut pow = 0;
 
     while (1 << (pow + 1)) <= num {
+        pow += 1;
+    }
+
+    pow
+}
+
+/// Return the smallest integer d such that num <= 2ᵈ
+pub fn log2_ceil(num: usize) -> u32 {
+    assert!(num > 0);
+
+    let mut pow = 0;
+
+    while (1 << pow) < num {
         pow += 1;
     }
 
@@ -555,4 +569,14 @@ fn test_lagrange_interpolate() {
             assert_eq!(eval_polynomial(&poly, *point), *eval);
         }
     }
+}
+
+#[test]
+fn test_log2() {
+    assert_eq!(log2_floor(3), 1);
+    assert_eq!(log2_floor(4), 2);
+    assert_eq!(log2_floor(5), 2);
+    assert_eq!(log2_ceil(3), 2);
+    assert_eq!(log2_ceil(4), 2);
+    assert_eq!(log2_ceil(5), 3);
 }
