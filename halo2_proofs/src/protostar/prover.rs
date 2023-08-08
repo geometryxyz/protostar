@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{
-    error_check::{Accumulator, GateEvaluationCache},
+    error_check::Accumulator,
     gate::{self, Expr},
     keygen::ProvingKey,
     transcript::{
