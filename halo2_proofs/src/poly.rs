@@ -85,6 +85,15 @@ pub(crate) fn empty_lagrange_assigned<F: ff::Field>(
         _marker: PhantomData,
     }
 }
+/// Obtains a polynomial in Lagrange form when given a vector of Lagrange
+/// coefficients of size `n`; panics if the provided vector is the wrong
+/// length.
+pub(crate) fn lagrange_from_vec<F: ff::Field>(values: Vec<F>) -> Polynomial<F, LagrangeCoeff> {
+    Polynomial {
+        values,
+        _marker: PhantomData,
+    }
+}
 
 impl<F, B> Index<usize> for Polynomial<F, B> {
     type Output = F;
@@ -143,26 +152,19 @@ impl<F, B> DerefMut for Polynomial<F, B> {
 }
 
 impl<F, B> Polynomial<F, B> {
-    pub fn boolean_linear_combination(eval0: &Self, eval1: &Self, alpha: F) -> Self
+    pub fn boolean_linear_combination(&mut self, other: &Self, alpha: F)
     where
         F: Field,
         B: Basis,
     {
-        assert_eq!(eval0.len(), eval1.len());
-        let mut result = Self {
-            values: vec![F::ZERO; eval0.len()],
-            _marker: PhantomData,
-        };
-        parallelize(&mut result.values, |res, start| {
-            for (res, (lhs, rhs)) in res.iter_mut().zip(zip(
-                eval0.values[start..].iter(),
-                eval1.values[start..].iter(),
-            )) {
-                *res = alpha * (*rhs - *lhs) + lhs;
+        assert_eq!(self.len(), other.len());
+        parallelize(&mut self.values, |res, start| {
+            for (lhs, rhs) in res.iter_mut().zip(other.values[start..].iter()) {
+                *lhs += alpha * (*rhs - *lhs);
             }
         });
-        result
     }
+
     /// Iterate over the values, which are either in coefficient or evaluation
     /// form depending on the basis `B`.
     pub fn iter(&self) -> impl Iterator<Item = &F> {

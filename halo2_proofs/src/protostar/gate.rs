@@ -7,23 +7,27 @@ use crate::{
     poly::Rotation,
 };
 
-/// A Protostar gate augments the structure of a plonk::Gate to allow for more efficient evaluation.
+/// A Protostar `Gate` augments the structure of a `plonk::Gate` to allow for more efficient evaluation.
+/// Stores the different polynomial expressions Gⱼ for the gate.
+/// Each Gⱼ is represented as tree where nodes point to indices of elements of the `queried_*` vectors.
+/// If all original polynomial expressions were multiplied at the top-level by a common simple `Selector`,
+/// this latter leaf is extracted from each Gⱼ and applied only once to all sub-polynomials.
+/// In general, this undoes the transformation done by `Constraints::with_selector`.
 #[derive(Clone)]
 pub struct Gate<F: Field> {
-    // polynomial expressions Gⱼ where nodes point to indices of elements of `queried_*` vectors
-    // top-level selector has been extracted into `simple_selectors` if the gate was obtained via `WithSelector`
-    pub(super) polys: Vec<Expr<F>>,
-    // simple selector for toggling all polys
-    pub(super) simple_selector: Option<Selector>,
-    // homogeneous degree of each poly
-    pub(super) degrees: Vec<usize>,
+    // List of polynomial expressions Gⱼ
+    pub polys: Vec<Expr<F>>,
+    // Simple `Selector` which multiplies all Gⱼ
+    pub simple_selector: Option<Selector>,
+    // Degrees of each Gⱼ
+    pub degrees: Vec<usize>,
 
-    // queries for this expression inside the full table.
-    pub(super) queried_selectors: Vec<Selector>,
-    pub(super) queried_fixed: Vec<FixedQuery>,
-    pub(super) queried_challenges: Vec<Challenge>,
-    pub(super) queried_instance: Vec<InstanceQuery>,
-    pub(super) queried_advice: Vec<AdviceQuery>,
+    // List of all columns queried by the polynomial expressions Gⱼ
+    pub queried_selectors: Vec<Selector>,
+    pub queried_fixed: Vec<FixedQuery>,
+    pub queried_challenges: Vec<Challenge>,
+    pub queried_instance: Vec<InstanceQuery>,
+    pub queried_advice: Vec<AdviceQuery>,
 }
 
 impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
@@ -31,7 +35,6 @@ impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
     /// - Extract the common top-level `Selector` if it exists
     /// - Extract all queries, and replace leaves with indices to the queries stored in the gate
     /// - Flatten challenges so that a product of the same challenge is replaced by a power of that challenge
-    /// - Homogenize the expression by introcuding a slack variable μ
     fn from(cs_gate: &crate::plonk::Gate<F>) -> Gate<F> {
         let mut selectors = BTreeSet::<Selector>::new();
         let mut fixed = BTreeSet::<FixedQuery>::new();
@@ -76,7 +79,7 @@ impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
         // get homogenized and degree-flattened expressions
         let polys: Vec<_> = polys
             .iter()
-            // convert Expression to Expr
+            // convert Expression to Expr, replacing each query node by its index in the given vectors
             .map(|e| e.to_expr(&selectors, &fixed, &challenges, &instance, &advice))
             // merge products of challenges into challenge powers
             .map(|e| {

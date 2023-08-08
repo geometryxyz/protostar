@@ -6,78 +6,106 @@ use std::{
 };
 
 use crate::{
-    arithmetic::{field_integers, lagrange_interpolate, powers},
-    poly::{commitment::Blind, empty_lagrange, LagrangeCoeff, Polynomial, Rotation},
+    arithmetic::{field_integers, lagrange_interpolate, parallelize, powers},
+    poly::{
+        commitment::{Blind, CommitmentScheme, Params},
+        empty_lagrange, LagrangeCoeff, Polynomial, Rotation,
+    },
+    transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ff::Field;
+use group::Curve;
 use halo2curves::CurveAffine;
 
-use super::{gate::Gate, keygen::ProvingKey};
+use super::{
+    gate::Gate,
+    keygen::ProvingKey,
+    transcript::{
+        advice::AdviceTranscript, compressed_verifier::CompressedVerifierTranscript,
+        instance::InstanceTranscript, lookup::LookupTranscipt,
+    },
+};
 
-pub struct Accumulator<F: Field> {
-    instance: AccumulatorInstance<F>,
-    witness: AccumulatorWitness<F>,
+/// An `Accumulator` contains the entirety of the IOP transcript,
+/// including commitments and verifier challenges.
+pub struct Accumulator<C: CurveAffine> {
+    instance_transcript: InstanceTranscript<C>,
+    advice_transcript: AdviceTranscript<C>,
+    compressed_verifier_transcript: CompressedVerifierTranscript<C>,
+    lookup_transcript: Option<LookupTranscipt<C>>,
+
+    // Powers of a challenge y for taking a random linear-combination of all constraints.
+    ys: Vec<C::Scalar>,
+
+    // Error value for all constraints
+    error: C::Scalar,
 }
 
-/// The "instance" portion of a Protostar accumulator
-/// TODO(@adr1anh): Implement `Add` so we can combine two accumulators.
-#[derive(Clone)]
-pub struct AccumulatorInstance<F: Field> {
-    // Variable cⱼᵈ, where `j` is the challenge index,
-    // and `d` is its power in the polynomial constraint.
-    // cⱼᵈ = `challenges[j][d]`
-    // The number of "powers" `d` of each challenge is determined by
-    // looking at the maximum `d` over all `polys` in each `gate`.
-    // For each `j`, we have `challenges[j].len() = d+1`,
-    // since we include `challenge[j][0] = 1`
-    challenges: Vec<Vec<F>>,
-    // Public inputs and outputs of the circuit
-    // The shape of `instance` is determined by `CircuitData::num_instance_rows`
-    instance: Vec<Polynomial<F, LagrangeCoeff>>,
+impl<C: CurveAffine> Accumulator<C> {
+    // Create a new `Accumulator` from the different transcripts.
+    pub fn new(
+        pk: &ProvingKey<C>,
+        instance_transcript: InstanceTranscript<C>,
+        advice_transcript: AdviceTranscript<C>,
+        lookup_transcript: Option<LookupTranscipt<C>>,
+        compressed_verifier_transcript: CompressedVerifierTranscript<C>,
+        y: C::Scalar,
+    ) -> Self {
+        // #[cfg(feature = "sanity-checks")]
+        // {
+        //     assert_eq!(
+        //         challenges.len(),
+        //         pk.num_challenges(),
+        //         "invalid number of challenges supplied"
+        //     );
+        //     assert_eq!(
+        //         instance.len(),
+        //         pk.num_instance_columns(),
+        //         "invalid number of instance columns supplied"
+        //     );
 
-    // initial challenge for combining all rows
-    beta: F,
-    beta_sqrt: F,
+        //     for (i, (instance_len, expected_len)) in zip(
+        //         instance.iter().map(|instance| instance.len()),
+        //         pk.num_instance_rows().iter(),
+        //     )
+        //     .enumerate()
+        //     {
+        //         assert_eq!(
+        //             instance_len, *expected_len,
+        //             "invalid size for instance column {i}"
+        //         );
+        //     }
+        // }
 
-    // challenges for randomly combining all gate polys
-    pub ys: Vec<F>,
-    // field error eval
-    error: F,
-}
+        let ys: Vec<_> = powers(y).skip(1).take(pk.num_constraints()).collect();
 
-#[derive(Clone)]
-/// The "witness" portion of the accumulator containing the verifier messages
-pub struct AccumulatorWitness<F: Field> {
-    advice: Vec<Polynomial<F, LagrangeCoeff>>,
-    advice_blinds: Vec<Blind<F>>,
-    betas: Vec<F>,
-    betas_sqrt: Vec<F>,
-}
-
-impl<F: Field> Accumulator<F> {
-    pub fn new(instance: AccumulatorInstance<F>, witness: AccumulatorWitness<F>) -> Self {
-        Self { instance, witness }
+        Self {
+            instance_transcript,
+            advice_transcript,
+            compressed_verifier_transcript,
+            lookup_transcript,
+            ys,
+            error: C::Scalar::ZERO,
+        }
     }
 
-    pub fn instance(&self) -> &AccumulatorInstance<F> {
-        &self.instance
-    }
-
-    pub fn witness(&self) -> &AccumulatorWitness<F> {
-        &self.witness
-    }
-
-    pub fn fold(mut self, pk: &ProvingKey<F>, new: Accumulator<F>) -> Self {
-        // 2 for beta, 1 for y
-        let num_extra_evaluations = 3;
+    /// Fold another accumulator in `self`.
+    pub fn fold<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+        &mut self,
+        pk: &ProvingKey<C>,
+        new: Accumulator<C>,
+        transcript: &mut T,
+    ) {
+        // 1 for beta, 1 for y
+        let num_extra_evaluations = 2;
         let mut gate_caches: Vec<_> = pk
             .gates()
             .iter()
             .map(|gate| {
                 GateEvaluationCache::new(
                     gate,
-                    self.instance(),
-                    new.instance(),
+                    &self.advice_transcript.challenges,
+                    &new.advice_transcript.challenges,
                     num_extra_evaluations,
                 )
             })
@@ -86,15 +114,6 @@ impl<F: Field> Accumulator<F> {
         let num_rows_i = pk.num_rows() as i32;
         let num_evals = pk.max_degree() + 1 + num_extra_evaluations;
 
-        let mut beta_iterator = BetaIterator::new(
-            self.witness().betas(),
-            self.witness().betas_sqrt(),
-            new.witness().betas(),
-            new.witness().betas_sqrt(),
-            pk.log2_sqrt_num_rows(),
-            num_evals,
-        );
-
         // Store the sum of the
         // eval_sums[gate_idx][constraint_idx][eval_idx]
         let mut error_polys: Vec<_> = gate_caches
@@ -102,12 +121,16 @@ impl<F: Field> Accumulator<F> {
             .map(|gate_cache| gate_cache.empty_error_polynomials())
             .collect();
 
-        for row_idx in 0..pk.num_rows() {
-            // Get the next evaluation of ((1-X) * acc.b1 + X * acc.b2)*((1-X) * new.b1 + X * new.b2)
-            let beta_evals = beta_iterator.evals_at_row(row_idx);
+        for row_idx in 0..pk.num_usable_rows() {
+            // Get the next evaluation of ((1-X) * acc.b + X * acc.b)
+            let beta_acc = self.compressed_verifier_transcript.beta_poly()[row_idx];
+            let beta_new = new.compressed_verifier_transcript.beta_poly()[row_idx];
+            let beta_evals: Vec<_> = boolean_evaluations(beta_acc, beta_new)
+                .take(num_evals)
+                .collect();
+
             for (gate_idx, gate_cache) in gate_caches.iter_mut().enumerate() {
-                let evals =
-                    gate_cache.evaluate(row_idx, num_rows_i, &pk, self.witness(), new.witness());
+                let evals = gate_cache.evaluate(row_idx, num_rows_i, &pk, self, &new);
                 if let Some(evals) = evals {
                     // For each constraint in the current gate, scale it by the beta vector
                     // and add it to the corresponding error polynomial accumulator `error_polys`
@@ -115,19 +138,20 @@ impl<F: Field> Accumulator<F> {
                         zip(error_polys[gate_idx].iter_mut(), evals.iter())
                     {
                         // Multiply each poly by b1*b2 and add it to the corresponding accumulator
-                        acc_error_poly.add_multiplied(new_error_poly, beta_evals);
+                        acc_error_poly.add_multiplied(new_error_poly, &beta_evals);
                     }
                 }
             }
         }
+
         let final_poly = {
-            let mut final_poly = vec![F::ZERO; num_evals];
+            let mut final_poly = vec![C::Scalar::ZERO; num_evals];
 
             // TODO(@adr1anh): The inner loop can be optimized since `to_coefficients` does a lot of common preprocessing.
             for (evals, (y_acc, y_new)) in error_polys
                 .iter_mut()
                 .flat_map(|polys| polys.iter_mut())
-                .zip(zip(self.instance().ys.iter(), new.instance().ys.iter()))
+                .zip(zip(self.ys.iter(), new.ys.iter()))
             {
                 // Multiply e_j(X) by y_j
                 evals.multiply_by_challenge_var(*y_acc, *y_new);
@@ -140,239 +164,220 @@ impl<F: Field> Accumulator<F> {
             }
             final_poly
         };
-        let expected_error_acc: F = final_poly[0];
-        let expected_error_new: F = final_poly.iter().sum();
 
-        assert_eq!(expected_error_acc, self.instance.error);
-        assert_eq!(expected_error_new, new.instance.error);
-        // TODO(@adr1anh): Commit to `final_poly` but ignore first and last coefficient
-        // The first one is equal to the error of `self`
-        // The last one should be 0 due to homogeneity.
+        // The error term for the existing accumulator should be e(0),
+        // which is equal to the first coefficient of `final_poly`
+        let expected_error_acc: C::Scalar = final_poly[0];
+        assert_eq!(expected_error_acc, self.error);
+
+        // The error term for the fresh accumulator should be e(1),
+        // which is equal to the sum of the coefficient of `final_poly`
+        let expected_error_new: C::Scalar = final_poly.iter().sum();
+        assert_eq!(expected_error_new, new.error);
+
+        // Commit to error poly
+        for coef in final_poly.iter() {
+            let _ = transcript.write_scalar(*coef);
+        }
 
         // TODO(@adr1anh): Get alpha challenge from transcript
-        let alpha = F::ONE;
+        let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
 
-        self = self.linear_combination(new, alpha, &final_poly);
-        self
-    }
-
-    // TODO(@adr1anh) no discard
-    fn linear_combination(mut self, new: Accumulator<F>, alpha: F, final_poly: &[F]) -> Self {
-        self.instance = self
-            .instance
-            .linear_combination(new.instance, alpha, final_poly);
-        self.witness = self.witness.linear_combination(new.witness, alpha);
-        self
-    }
-}
-
-impl<F: Field> AccumulatorInstance<F> {
-    /// Generate an empty accumulator with all values set to zero.
-    pub fn new_empty(pk: &ProvingKey<F>) -> Self {
-        // For each challenge `j`, with max degee `power`,
-        // we need `power + 1` elements
-        let challenges: Vec<_> = pk
-            .max_challenge_powers()
-            .iter()
-            .map(|power| vec![F::ZERO; *power + 1])
-            .collect();
-
-        let instance = pk
-            .num_instance_rows()
-            .iter()
-            .map(|num_rows| empty_lagrange(*num_rows))
-            .collect();
-
-        let ys = vec![F::ZERO; pk.num_constraints()];
-
-        Self {
-            challenges,
-            instance,
-            beta: F::ZERO,
-            beta_sqrt: F::ZERO,
-            ys,
-            error: F::ZERO,
+        // fold challenges
+        for (c_acc, c_new) in zip(self.challenges_iter_mut(), new.challenges_iter()) {
+            *c_acc += alpha * (*c_new - *c_acc);
         }
-    }
 
-    // Create accumulator instance given data obtained by generating the witness.
-    pub fn new(
-        pk: &ProvingKey<F>,
-        challenges: Vec<F>,
-        instance: Vec<Polynomial<F, LagrangeCoeff>>,
-        beta: F,
-        y: F,
-    ) -> Self {
-        #[cfg(feature = "sanity-checks")]
+        // fold polynomials
+        for (poly_acc, poly_new) in zip(self.polynomials_iter_mut(), new.polynomials_iter()) {
+            poly_acc.boolean_linear_combination(poly_new, alpha);
+        }
+
+        // fold commitments
         {
-            assert_eq!(
-                challenges.len(),
-                pk.num_challenges(),
-                "invalid number of challenges supplied"
-            );
-            assert_eq!(
-                instance.len(),
-                pk.num_instance_columns(),
-                "invalid number of instance columns supplied"
-            );
-
-            for (i, (instance_len, expected_len)) in zip(
-                instance.iter().map(|instance| instance.len()),
-                pk.num_instance_rows().iter(),
-            )
-            .enumerate()
-            {
-                assert_eq!(
-                    instance_len, *expected_len,
-                    "invalid size for instance column {i}"
-                );
+            let commitments_projective: Vec<_> =
+                zip(self.commitments_iter(), new.commitments_iter())
+                    .map(|(c_acc, c_new)| (*c_new - *c_acc) * alpha + *c_acc)
+                    .collect();
+            let mut commitments_affine = vec![C::identity(); commitments_projective.len()];
+            C::CurveExt::batch_normalize(&commitments_projective, &mut commitments_affine);
+            for (c_acc, c_new) in zip(self.commitments_iter_mut(), commitments_affine) {
+                *c_acc = c_new
             }
         }
 
-        let challenge_powers: Vec<_> = zip(challenges.iter(), pk.max_challenge_powers().iter())
-            .map(|(c, power)| powers(*c).take(power + 1).collect())
-            .collect();
-        let k_sqrt = pk.log2_sqrt_num_rows();
-        let n_sqrt = 1 << k_sqrt;
-        let beta_sqrt = beta.pow_vartime([n_sqrt as u64]);
-
-        let ys: Vec<_> = powers(y).take(pk.num_constraints()).collect();
-        Self {
-            challenges: challenge_powers,
-            instance,
-            beta,
-            beta_sqrt,
-            ys,
-            error: F::ZERO,
+        // fold blinds
+        for (blind_acc, blind_new) in zip(self.blinds_iter_mut(), new.blinds_iter()) {
+            *blind_acc += (*blind_new - *blind_acc) * alpha
         }
-    }
-
-    // TODO(@adr1anh) no discard
-    fn linear_combination(
-        mut self,
-        new: AccumulatorInstance<F>,
-        alpha: F,
-        final_poly: &[F],
-    ) -> Self {
-        self.beta += alpha * (new.beta - self.beta);
-        self.beta_sqrt += alpha * (new.beta_sqrt - self.beta_sqrt);
 
         // horner eval of the polynomial e(X) in alpha
-        assert_eq!(final_poly[0], self.error);
-        self.error = F::ZERO;
+        self.error = C::Scalar::ZERO;
         for coeff in final_poly.iter().rev() {
             self.error *= alpha;
             self.error += coeff;
         }
+    }
 
-        for (acc_challenge, new_challenge) in zip(
-            self.challenges.iter_mut().flat_map(|c| c.iter_mut()),
-            new.challenges.iter().flat_map(|c| c.iter()),
-        ) {
-            *acc_challenge += alpha * (*new_challenge - *acc_challenge);
-        }
+    /// Checks whether this accumulator is valid by recomputing all commitments and the error.
+    pub fn decide<'params, P: Params<'params, C>>(&self, params: &P, pk: &ProvingKey<C>) -> bool {
+        let commitments_ok = {
+            let commitments_projective: Vec<_> = zip(self.polynomials_iter(), self.blinds_iter())
+                .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                .collect();
+            let mut commitments = vec![C::identity(); commitments_projective.len()];
+            C::CurveExt::batch_normalize(&commitments_projective, &mut commitments);
+            zip(commitments, self.commitments_iter()).all(|(actual, expected)| actual == *expected)
+        };
 
-        for (acc_instance, new_instance) in zip(self.instance.iter_mut(), new.instance.iter()) {
-            *acc_instance =
-                Polynomial::boolean_linear_combination(acc_instance, new_instance, alpha);
-        }
+        // TODO(@adr1anh): Cleanup gate evaluation before implementing the rest
+        // let num_rows_i = pk.num_rows() as i32;
+        // /// Return the index in the polynomial of size `isize` after rotation `rot`.
+        // fn get_rotation_idx(idx: usize, rot: Rotation, isize: i32) -> usize {
+        //     (((idx as i32) + rot.0).rem_euclid(isize)) as usize
+        // }
 
-        for (acc_y, new_y) in zip(self.ys.iter_mut(), new.ys.iter()) {
-            *acc_y += alpha * (*new_y - *acc_y);
-        }
+        // let mut errors = vec![C::Scalar::ZERO; pk.num_usable_rows()];
+        // parallelize(&mut errors, |errors, start| {
+        //     let mut es: Vec<_> = pk
+        //         .gates()
+        //         .iter()
+        //         .map(|gate| vec![C::Scalar::ZERO; gate.polys.len()])
+        //         .collect();
+        //     for (i, e) in errors.iter_mut().enumerate() {
+        //         let row = start + i;
 
-        self
+        //         for (gate, es) in zip(pk.gates().iter(), es.iter_mut()) {
+        //             if let Some(simple_selector) = gate.simple_selector {
+        //                 let selector_column = simple_selector.0;
+        //                 let value = pk.selectors[selector_column][row];
+        //                 // do nothing and return
+        //                 if !value {
+        //                     continue;
+        //                 }
+        //             }
+        //         }
+
+        //         // let e_single = poly.evaluate(
+        //         //     &|constant| constant,
+        //         //     &|selector_idx| if pk.selectors[selector_idx][idx]{C::Scalar::ONE} else {C::Scalar::ZERO},
+        //         //     &|fixed_idx| pk.fixed[fixed_idx],
+        //         //     &|advice_idx| advice_tmp[advice_idx],
+        //         //     &|instance_idx| instance_tmp[instance_idx],
+        //         //     &|challenge_idx, challenge_power| {
+        //         //         self.challenge_powers_evals[eval_idx][challenge_idx][challenge_power - 1]
+        //         //     },
+        //         //     &|negated| -negated,
+        //         //     &|sum_a, sum_b| sum_a + sum_b,
+        //         //     &|prod_a, prod_b| prod_a * prod_b,
+        //         //     &|scaled, v| scaled * v,)
+        //     }
+        // });
+
+        commitments_ok
+    }
+
+    pub fn challenges_iter(&self) -> impl Iterator<Item = &C::Scalar> {
+        self.instance_transcript
+            .challenges_iter()
+            .chain(self.advice_transcript.challenges_iter())
+            .chain(
+                self.lookup_transcript
+                    .iter()
+                    .flat_map(|lookup_transcript| lookup_transcript.challenges_iter()),
+            )
+            .chain(self.compressed_verifier_transcript.challenges_iter())
+            .chain(self.ys.iter())
+    }
+
+    pub fn challenges_iter_mut(&mut self) -> impl Iterator<Item = &mut C::Scalar> {
+        self.instance_transcript
+            .challenges_iter_mut()
+            .chain(self.advice_transcript.challenges_iter_mut())
+            .chain(
+                self.lookup_transcript
+                    .iter_mut()
+                    .flat_map(|lookup_transcript| lookup_transcript.challenges_iter_mut()),
+            )
+            .chain(self.compressed_verifier_transcript.challenges_iter_mut())
+            .chain(self.ys.iter_mut())
+    }
+
+    pub fn polynomials_iter(&self) -> impl Iterator<Item = &Polynomial<C::Scalar, LagrangeCoeff>> {
+        self.instance_transcript
+            .polynomials_iter()
+            .chain(self.advice_transcript.polynomials_iter())
+            .chain(
+                self.lookup_transcript
+                    .iter()
+                    .flat_map(|lookup_transcript| lookup_transcript.polynomials_iter()),
+            )
+            .chain(self.compressed_verifier_transcript.polynomials_iter())
+    }
+
+    pub fn polynomials_iter_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut Polynomial<C::Scalar, LagrangeCoeff>> {
+        self.instance_transcript
+            .polynomials_iter_mut()
+            .chain(self.advice_transcript.polynomials_iter_mut())
+            .chain(
+                self.lookup_transcript
+                    .iter_mut()
+                    .flat_map(|lookup_transcript| lookup_transcript.polynomials_iter_mut()),
+            )
+            .chain(self.compressed_verifier_transcript.polynomials_iter_mut())
+    }
+
+    pub fn commitments_iter(&self) -> impl Iterator<Item = &C> {
+        self.instance_transcript
+            .commitments_iter()
+            .chain(self.advice_transcript.commitments_iter())
+            .chain(
+                self.lookup_transcript
+                    .iter()
+                    .flat_map(|lookup_transcript| lookup_transcript.commitments_iter()),
+            )
+            .chain(self.compressed_verifier_transcript.commitments_iter())
+    }
+
+    pub fn commitments_iter_mut(&mut self) -> impl Iterator<Item = &mut C> {
+        self.instance_transcript
+            .commitments_iter_mut()
+            .chain(self.advice_transcript.commitments_iter_mut())
+            .chain(
+                self.lookup_transcript
+                    .iter_mut()
+                    .flat_map(|lookup_transcript| lookup_transcript.commitments_iter_mut()),
+            )
+            .chain(self.compressed_verifier_transcript.commitments_iter_mut())
+    }
+
+    pub fn blinds_iter(&self) -> impl Iterator<Item = &Blind<C::Scalar>> {
+        self.instance_transcript
+            .blinds_iter()
+            .chain(self.advice_transcript.blinds_iter())
+            .chain(
+                self.lookup_transcript
+                    .iter()
+                    .flat_map(|lookup_transcript| lookup_transcript.blinds_iter()),
+            )
+            .chain(self.compressed_verifier_transcript.blinds_iter())
+    }
+
+    pub fn blinds_iter_mut(&mut self) -> impl Iterator<Item = &mut Blind<C::Scalar>> {
+        self.instance_transcript
+            .blinds_iter_mut()
+            .chain(self.advice_transcript.blinds_iter_mut())
+            .chain(
+                self.lookup_transcript
+                    .iter_mut()
+                    .flat_map(|lookup_transcript| lookup_transcript.blinds_iter_mut()),
+            )
+            .chain(self.compressed_verifier_transcript.blinds_iter_mut())
     }
 }
 
-impl<F: Field> AccumulatorWitness<F> {
-    // Initialized a new empty `AccumulatorWitness` for a given circuit,
-    // with all values set to zero.
-    pub fn new_empty(pk: &ProvingKey<F>) -> Self {
-        let advice = vec![empty_lagrange(pk.num_rows()); pk.num_advice_columns()];
-        let k_sqrt = pk.log2_sqrt_num_rows();
-        let n_sqrt = 1 << k_sqrt;
-        // TODO(@adr1anh): replace with actual lengths
-        // let advice = pk
-        //     .circuit_data
-        //     .num_advice_rows
-        //     .iter()
-        //     .map(|advice_len| empty_lagrange(*advice_len))
-        //     .collect();
-        let betas = vec![F::ONE; n_sqrt];
-        let betas_sqrt = vec![F::ONE; n_sqrt];
-        Self {
-            advice,
-            advice_blinds: vec![Blind::default(); pk.num_advice_columns()],
-            betas,
-            betas_sqrt,
-        }
-    }
-
-    // Initializes a new `AccumulatorWitness` given a list of advice columns generated by the prover.
-    pub fn new(
-        pk: &ProvingKey<F>,
-        advice: Vec<Polynomial<F, LagrangeCoeff>>,
-        advice_blinds: Vec<Blind<F>>,
-        betas: Vec<F>,
-        betas_sqrt: Vec<F>,
-    ) -> Self {
-        let k_sqrt = pk.log2_sqrt_num_rows();
-        let n_sqrt = 1 << k_sqrt;
-        #[cfg(feature = "sanity-checks")]
-        {
-            assert_eq!(
-                advice.len(),
-                advice_blinds.len(),
-                "number of advice columns and blinds must match"
-            );
-            assert_eq!(betas.len(), n_sqrt, "betas must be of size sqrt(num_rows)");
-            assert_eq!(
-                betas_sqrt.len(),
-                n_sqrt,
-                "betas_sqrt must be of size sqrt(num_rows)"
-            );
-            // TODO(@adr1anh): check the lengths of `advice`
-        }
-
-        Self {
-            advice,
-            advice_blinds,
-            betas,
-            betas_sqrt,
-        }
-    }
-
-    pub fn betas(&self) -> &[F] {
-        &self.betas
-    }
-    pub fn betas_sqrt(&self) -> &[F] {
-        &self.betas_sqrt
-    }
-
-    // TODO(@adr1anh) no discard
-    fn linear_combination(mut self, new: AccumulatorWitness<F>, alpha: F) -> Self {
-        // TODO(@adr1anh): sanity checks for same size
-        for (acc_advice, new_advice) in zip(self.advice.iter_mut(), new.advice.iter()) {
-            *acc_advice = Polynomial::boolean_linear_combination(acc_advice, new_advice, alpha);
-        }
-        for (acc_advice_blind, new_advice_blind) in
-            zip(self.advice_blinds.iter_mut(), new.advice_blinds.iter())
-        {
-            *acc_advice_blind += *new_advice_blind * alpha;
-        }
-
-        for (acc_beta0, new_beta0) in zip(self.betas.iter_mut(), new.betas.iter()) {
-            *acc_beta0 += alpha * new_beta0;
-        }
-        for (acc_beta1, new_beta1) in zip(self.betas_sqrt.iter_mut(), new.betas_sqrt.iter()) {
-            *acc_beta1 += alpha * new_beta1;
-        }
-        self
-    }
-}
-
-#[derive(Clone)]
 /// When evaluating a `Gate` over all rows, we fetch the input data from the previous accumulator
 /// and the new witness and store it in this struct.
 /// This struct can be cloned when paralellizing the evaluation over chunks of rows,
@@ -429,8 +434,8 @@ impl<F: Field> GateEvaluationCache<F> {
     /// so that the resulting evaluations can be multiplied afterwards, for example by the challenge `y`.
     pub fn new(
         gate: &Gate<F>,
-        gate_accumulator: &AccumulatorInstance<F>,
-        gate_transcript: &AccumulatorInstance<F>,
+        acc_challenges: &[Vec<F>],
+        new_challenges: &[Vec<F>],
         num_extra_evaluations: usize,
     ) -> Self {
         // Each `poly` Gⱼ(X) has degree dⱼ and dⱼ+1 coefficients,
@@ -452,11 +457,8 @@ impl<F: Field> GateEvaluationCache<F> {
         //    X     = 0, 1, ..., max_num_evals   - 1
         //    j     = 0, 1, ..., num_challenges  - 1
         //    power = 0, 1, ..., max_poly_degree
-        let challenge_powers_evals = evaluated_challenge_powers(
-            &gate_accumulator.challenges,
-            &gate_transcript.challenges,
-            max_num_evals,
-        );
+        let challenge_powers_evals =
+            evaluated_challenge_powers(acc_challenges, new_challenges, max_num_evals);
 
         // for each polynomial, allocate a buffer for storing all the evaluations
         let gate_eval = num_evals
@@ -481,14 +483,16 @@ impl<F: Field> GateEvaluationCache<F> {
     }
 
     /// Fills the local variables buffers with data from the accumulator and new transcript
-    fn populate(
+    fn populate<C>(
         &mut self,
         row: usize,
         isize: i32,
-        circuit_data: &ProvingKey<F>,
-        acc: &AccumulatorWitness<F>,
-        new: &AccumulatorWitness<F>,
-    ) {
+        pk: &ProvingKey<C>,
+        acc: &Accumulator<C>,
+        new: &Accumulator<C>,
+    ) where
+        C: CurveAffine<ScalarExt = F>,
+    {
         /// Return the index in the polynomial of size `isize` after rotation `rot`.
         fn get_rotation_idx(idx: usize, rot: Rotation, isize: i32) -> usize {
             (((idx as i32) + rot.0).rem_euclid(isize)) as usize
@@ -497,7 +501,7 @@ impl<F: Field> GateEvaluationCache<F> {
         // Check if the gate is guarded by a simple selector and whether it is active
         if let Some(simple_selector) = self.gate.simple_selector {
             let selector_column = simple_selector.0;
-            let value = circuit_data.selectors[selector_column][row];
+            let value = pk.selectors[selector_column][row];
             self.simple_selector = Some(value);
             // do nothing and return
             if !value {
@@ -508,7 +512,7 @@ impl<F: Field> GateEvaluationCache<F> {
         // Fill selectors
         for (i, selector) in self.gate.queried_selectors.iter().enumerate() {
             let selector_column = selector.0;
-            let value = circuit_data.selectors[selector_column][row];
+            let value = pk.selectors[selector_column][row];
             self.selectors[i] = if value { F::ONE } else { F::ZERO };
         }
 
@@ -516,24 +520,27 @@ impl<F: Field> GateEvaluationCache<F> {
         for (i, fixed) in self.gate.queried_fixed.iter().enumerate() {
             let fixed_column = fixed.column_index();
             let fixed_row = get_rotation_idx(row, fixed.rotation(), isize);
-            self.fixed[i] = circuit_data.fixed[fixed_column][fixed_row];
+            self.fixed[i] = pk.fixed[fixed_column][fixed_row];
         }
 
         // Fill instance
         for (i, instance) in self.gate.queried_instance.iter().enumerate() {
             let instance_column = instance.column_index();
             let instance_row = get_rotation_idx(row, instance.rotation(), isize);
-            self.instance_acc[i] = acc.advice[instance_column][instance_row];
-            self.instance_diff[i] =
-                new.advice[instance_column][instance_row] - self.instance_acc[i];
+            self.instance_acc[i] =
+                acc.instance_transcript.instance_polys[instance_column][instance_row];
+            self.instance_diff[i] = new.instance_transcript.instance_polys[instance_column]
+                [instance_row]
+                - self.instance_acc[i];
         }
 
         // Fill advice
         for (i, advice) in self.gate.queried_advice.iter().enumerate() {
             let advice_column = advice.column_index();
             let advice_row = get_rotation_idx(row, advice.rotation(), isize);
-            self.advice_acc[i] = acc.advice[advice_column][advice_row];
-            self.advice_diff[i] = new.advice[advice_column][advice_row] - self.advice_acc[i];
+            self.advice_acc[i] = acc.advice_transcript.advice_polys[advice_column][advice_row];
+            self.advice_diff[i] =
+                new.advice_transcript.advice_polys[advice_column][advice_row] - self.advice_acc[i];
         }
     }
 
@@ -541,14 +548,17 @@ impl<F: Field> GateEvaluationCache<F> {
     /// Returns `None` if the common selector for the gate is false,
     /// otherwise returns a list of vectors containing the evaluations for
     /// each `poly` Gⱼ(X) in `gate`.
-    pub fn evaluate(
+    pub fn evaluate<C>(
         &mut self,
         row: usize,
         isize: i32,
-        pk: &ProvingKey<F>,
-        acc: &AccumulatorWitness<F>,
-        new: &AccumulatorWitness<F>,
-    ) -> Option<&[ErrorEvaluations<F>]> {
+        pk: &ProvingKey<C>,
+        acc: &Accumulator<C>,
+        new: &Accumulator<C>,
+    ) -> Option<&[ErrorEvaluations<F>]>
+    where
+        C: CurveAffine<ScalarExt = F>,
+    {
         // Fill the buffers with data from the fixed circuit_data, the previous accumulator
         // and the new witness.
         self.populate(row, isize, pk, acc, new);
@@ -593,7 +603,7 @@ impl<F: Field> GateEvaluationCache<F> {
                     &|advice_idx| advice_tmp[advice_idx],
                     &|instance_idx| instance_tmp[instance_idx],
                     &|challenge_idx, challenge_power| {
-                        self.challenge_powers_evals[eval_idx][challenge_idx][challenge_power]
+                        self.challenge_powers_evals[eval_idx][challenge_idx][challenge_power - 1]
                     },
                     &|negated| -negated,
                     &|sum_a, sum_b| sum_a + sum_b,
@@ -619,7 +629,7 @@ impl<F: Field> GateEvaluationCache<F> {
 /// Given two lists of challenge powers from an existing accumulator and a new circuit execution,
 /// compute the evaluations at X = 0, 1, ..., num_evals-1 of "challenges_acc + X⋅challenges_new".
 /// The returned vector satisfies:
-/// challenge_powers_evals[X][j][power] = challenges_acc[j][power] + X⋅challenges_new[j]^power
+/// challenge_powers_evals[X][power][j] = (1-X)⋅challenges_acc[power][j] + X⋅challenges_new[j]^power
 /// for
 ///    X     = 0, 1, ..., num_evals       - 1
 ///    j     = 0, 1, ..., num_challenges  - 1
@@ -670,7 +680,6 @@ pub fn evaluated_challenge_powers<F: Field>(
     challenge_powers_evals
 }
 
-#[derive(Clone)]
 // This could be more general, i.e. a
 // - the evaluation of a row
 // - eval of a challenge
@@ -719,59 +728,59 @@ fn boolean_evaluations<F: Field>(eval0: F, eval1: F) -> impl Iterator<Item = F> 
     std::iter::successors(Some(eval0), move |acc| Some(linear + acc))
 }
 
-/// Non-comforming iterator yielding evaluations of
-/// (acc.β₀ + X⋅new.β₀)⋅(acc.β₁ + X⋅new.β₁)
-struct BetaIterator<'a, 'b, F: Field> {
-    betas0_acc: &'a [F],
-    betas1_acc: &'a [F],
-    betas0_new: &'b [F],
-    betas1_new: &'b [F],
+// /// Non-comforming iterator yielding evaluations of
+// /// (acc.β₀ + X⋅new.β₀)⋅(acc.β₁ + X⋅new.β₁)
+// struct BetaIterator<'a, 'b, F: Field> {
+//     betas0_acc: &'a [F],
+//     betas1_acc: &'a [F],
+//     betas0_new: &'b [F],
+//     betas1_new: &'b [F],
 
-    // log2(n^{1/2})
-    k_sqrt: u32,
-    // 2^k_sqrt - 1
-    mask: usize,
+//     // log2(n^{1/2})
+//     k_sqrt: u32,
+//     // 2^k_sqrt - 1
+//     mask: usize,
 
-    evals: Vec<F>,
-}
+//     evals: Vec<F>,
+// }
 
-impl<'a, 'b, F: Field> BetaIterator<'a, 'b, F> {
-    fn new(
-        betas0_acc: &'a [F],
-        betas1_acc: &'a [F],
-        betas0_new: &'b [F],
-        betas1_new: &'b [F],
-        k_sqrt: u32,
-        num_evals: usize,
-    ) -> Self {
-        let n_sqrt = 1 << k_sqrt;
-        let mask = n_sqrt - 1;
-        Self {
-            betas0_acc,
-            betas1_acc,
-            betas0_new,
-            betas1_new,
-            k_sqrt,
-            mask,
-            evals: vec![F::ZERO; num_evals],
-        }
-    }
+// impl<'a, 'b, F: Field> BetaIterator<'a, 'b, F> {
+//     fn new(
+//         betas0_acc: &'a [F],
+//         betas1_acc: &'a [F],
+//         betas0_new: &'b [F],
+//         betas1_new: &'b [F],
+//         k_sqrt: u32,
+//         num_evals: usize,
+//     ) -> Self {
+//         let n_sqrt = 1 << k_sqrt;
+//         let mask = n_sqrt - 1;
+//         Self {
+//             betas0_acc,
+//             betas1_acc,
+//             betas0_new,
+//             betas1_new,
+//             k_sqrt,
+//             mask,
+//             evals: vec![F::ZERO; num_evals],
+//         }
+//     }
 
-    fn evals_at_row(&mut self, row_index: usize) -> &[F] {
-        let i0 = row_index & self.mask;
-        let i1 = row_index >> self.k_sqrt;
-        let mut beta0 = self.betas0_acc[i0];
-        let mut beta1 = self.betas1_acc[i1];
-        let beta0_new = self.betas0_new[i0];
-        let beta1_new = self.betas1_new[i1];
+//     fn evals_at_row(&mut self, row_index: usize) -> &[F] {
+//         let i0 = row_index & self.mask;
+//         let i1 = row_index >> self.k_sqrt;
+//         let mut beta0 = self.betas0_acc[i0];
+//         let mut beta1 = self.betas1_acc[i1];
+//         let beta0_new = self.betas0_new[i0];
+//         let beta1_new = self.betas1_new[i1];
 
-        self.evals[0] = beta0 * beta1;
-        for i in 1..self.evals.len() {
-            beta0 += beta0_new;
-            beta1 += beta1_new;
-            self.evals[i] = beta0 * beta1;
-        }
+//         self.evals[0] = beta0 * beta1;
+//         for i in 1..self.evals.len() {
+//             beta0 += beta0_new;
+//             beta1 += beta1_new;
+//             self.evals[i] = beta0 * beta1;
+//         }
 
-        self.evals.as_slice()
-    }
-}
+//         self.evals.as_slice()
+//     }
+// }

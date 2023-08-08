@@ -1,7 +1,6 @@
 use core::num;
 use std::{collections::BTreeSet, ops::Range};
 
-use super::gate::{Expr, Gate};
 use ff::Field;
 use halo2curves::CurveAffine;
 
@@ -19,47 +18,54 @@ use crate::{
     },
 };
 
-/// CircuitData is the minimal algebraic representation of a PlonK-ish circuit.
-/// From this, we can derive the Proving/Verification keys for a chosen proof system.
-pub struct ProvingKey<F: Field> {
-    // maximum number of rows in the trace
+use super::gate::{Expr, Gate};
+
+/// Contains all fixed data for a circuit that is required to create a Protostar `Accumulator`
+pub struct ProvingKey<C: CurveAffine> {
+    // maximum number of rows in the trace (including blinding factors)
     num_rows: usize,
     // max active rows, without blinding
     pub usable_rows: Range<usize>,
-    // original constraint system
-    cs: ConstraintSystem<F>,
 
-    // gates transformed from cs
-    gates: Vec<Gate<F>>,
+    // The circuit's unmodified constraint system
+    cs: ConstraintSystem<C::Scalar>,
 
-    // actual number of elements in each column for each column type.
+    // Transformed `plonk::Gate`s which have been pre-processed for Protostar
+    gates: Vec<Gate<C::Scalar>>,
+
+    // For each column of each type, store the number of real values in each column.
     num_selector_rows: Vec<usize>,
     num_fixed_rows: Vec<usize>,
     num_advice_rows: Vec<usize>,
     num_instance_rows: Vec<usize>,
 
-    // fixed[fixed_col][row]
-    pub fixed: Vec<Polynomial<F, LagrangeCoeff>>,
-    // selectors[gate][row]
+    // Fixed columns
+    // fixed[col][row]
+    pub fixed: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    // Selector columns as `bool`s
+    // selectors[col][row]
     // TODO(@adr1anh): Replace with a `BTreeMap` to save memory
     pub selectors: Vec<Vec<bool>>,
 
-    // permutations[advice_col][row] = sigma(advice_col*n+row)
-    // advice_col are from cs.permutation
+    // Permutation columns mapping each, where
+    // permutations[col][row] = sigma(col*num_rows + row)
     // TODO(@adr1anh): maybe store as Vec<Vec<(usize,usize)>)
     pub permutations: Vec<Vec<usize>>,
-    // lookups?
 }
 
-impl<F: Field> ProvingKey<F> {
+impl<C: CurveAffine> ProvingKey<C> {
     /// Generate algebraic representation of the circuit.
-    pub fn new<ConcreteCircuit>(
-        num_rows: usize,
+    pub fn new<'params, P, ConcreteCircuit>(
+        params: &P,
         circuit: &ConcreteCircuit,
-    ) -> Result<ProvingKey<F>, Error>
+    ) -> Result<ProvingKey<C>, Error>
     where
-        ConcreteCircuit: Circuit<F>,
+        P: Params<'params, C>,
+        ConcreteCircuit: Circuit<C::Scalar>,
     {
+        let num_rows = params.n() as usize;
+        // k = log2(num_rows)
+        let k = params.k();
         // Get `config` from the `ConstraintSystem`
         let mut cs = ConstraintSystem::default();
         #[cfg(feature = "circuit-params")]
@@ -68,19 +74,15 @@ impl<F: Field> ProvingKey<F> {
         let config = ConcreteCircuit::configure(&mut cs);
 
         let cs = cs;
-        // let k = n.next_power_of_two() as u32;
 
         // TODO(@adr1anh): Blinding will be different for Protostar
-        // if n < cs.minimum_rows() {
+        // if num_rows < cs.minimum_rows() {
         //     return Err(Error::not_enough_rows_available(k));
         // }
 
-        let mut assembly: Assembly<F> = Assembly {
-            num_rows,
-            // We don't need blinding factors for Protostar, but later for the Decider,
-            // leave for now
-            usable_rows: 0..num_rows,
-            k: num_rows.next_power_of_two() as u32,
+        let mut assembly: Assembly<C::Scalar> = Assembly {
+            usable_rows: 0..num_rows - (cs.blinding_factors() + 1),
+            k: params.k(),
 
             fixed: vec![empty_lagrange_assigned(num_rows); cs.num_fixed_columns],
             permutation: permutation::keygen::Assembly::new(num_rows, &cs.permutation),
@@ -105,7 +107,6 @@ impl<F: Field> ProvingKey<F> {
         let fixed = batch_invert_assigned(assembly.fixed);
 
         // We don't want to compress selectors for our usecase,
-        // TODO(@adr1anh): Handle panics for place which assume the simple selectors were removed
         // let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
         // fixed.extend(
         //     selector_polys
@@ -121,7 +122,6 @@ impl<F: Field> ProvingKey<F> {
 
         Ok(ProvingKey {
             num_rows,
-            // k,
             usable_rows: assembly.usable_rows,
             cs,
             gates,
@@ -135,6 +135,7 @@ impl<F: Field> ProvingKey<F> {
         })
     }
 
+    /// Maximum degree over all gates in the circuit
     pub fn max_degree(&self) -> usize {
         *self
             .gates
@@ -144,64 +145,90 @@ impl<F: Field> ProvingKey<F> {
             .unwrap()
     }
 
-    pub fn cs(&self) -> &ConstraintSystem<F> {
+    /// Returns the `ConstraintSystem`
+    pub fn cs(&self) -> &ConstraintSystem<C::Scalar> {
         &self.cs
     }
 
+    /// Number of different `Challenge`s in the `AdviceTranscript`
     pub fn num_challenges(&self) -> usize {
         self.cs.num_challenges()
     }
+
+    /// Number of `Instance` columns
     pub fn num_instance_columns(&self) -> usize {
         self.cs.num_instance_columns()
     }
+
+    /// Number of elements in each `Instance` column
     pub fn num_instance_rows(&self) -> &[usize] {
         &self.num_instance_rows
     }
+
+    /// Number of `Advice` columns
     pub fn num_advice_columns(&self) -> usize {
         self.cs.num_advice_columns()
     }
+
+    /// Number of elements in each `Advice` column
     pub fn num_advice_rows(&self) -> &[usize] {
         &self.num_advice_rows
     }
+
+    /// Number of `Fixed` columns
     pub fn num_fixed_columns(&self) -> usize {
         self.cs.num_fixed_columns()
     }
+
+    /// Number of elements in each `Fixed` column
     pub fn num_fixed_rows(&self) -> &[usize] {
         &self.num_fixed_rows
     }
+
+    /// Number of `Selector` columns
     pub fn num_selectors(&self) -> usize {
         self.cs.num_selectors()
     }
 
+    /// Total number of rows, including blinding factors and padding
     pub fn num_rows(&self) -> usize {
         self.num_rows
     }
 
+    /// Number of rows at which a `Gate` constraint must hold
+    pub fn num_usable_rows(&self) -> usize {
+        self.usable_rows.end
+    }
+
+    /// Returns the smallest `k` such that n ≤ 2^{2k}.
+    /// Approximately log₂(√n)
     pub fn log2_sqrt_num_rows(&self) -> u32 {
-        let k = log2_ceil(self.num_rows());
+        let k = log2_ceil(self.num_rows);
         // if k is odd, add 1, and divide by 2
         (k + (k % 2)) >> 1
     }
 
+    /// Returns a vector of same size as `num_challenges` where each entry
+    /// is equal to the highest power `d` that a challenge appears over all `Gate`s
     pub fn max_challenge_powers(&self) -> Vec<usize> {
-        // for each challenge, find the maximum power of it appearing across all expressions
         let mut max_challenge_power = vec![0; self.num_challenges()];
-        for gate in self.gates.iter() {
-            for poly in gate.polys.iter() {
-                poly.traverse(&mut |v| {
-                    if let Expr::Challenge(c, d) = v {
-                        max_challenge_power[*c] = std::cmp::max(max_challenge_power[*c], *d);
-                    }
-                });
-            }
+        // Iterate over all polynomials in all `Gate`s
+        for poly in self.gates.iter().flat_map(|gate| gate.polys.iter()) {
+            poly.traverse(&mut |v| {
+                if let Expr::Challenge(c, d) = v {
+                    max_challenge_power[*c] = std::cmp::max(max_challenge_power[*c], *d);
+                }
+            });
         }
         max_challenge_power
     }
 
-    pub fn gates(&self) -> &[Gate<F>] {
+    /// Returns a list of all `Gate`s in the circuit
+    pub fn gates(&self) -> &[Gate<C::Scalar>] {
         &self.gates
     }
 
+    /// Total number of linearly-independent constraints
     pub fn num_constraints(&self) -> usize {
         self.gates
             .iter()
@@ -230,8 +257,6 @@ impl<F: Field> ProvingKey<F> {
 /// Assembly to be used in circuit synthesis.
 #[derive(Debug)]
 struct Assembly<F: Field> {
-    // A range of available rows for assignment and copies.
-    num_rows: usize,
     usable_rows: Range<usize>,
     // TODO(@adr1anh): Only needed for the Error, remove later
     k: u32,

@@ -12,7 +12,7 @@ use rand_core::RngCore;
 use std::{
     fmt::Debug,
     io::{self, Read, Write},
-    ops::{Add, AddAssign, Mul, MulAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 
 /// Defines components of a commitment scheme.
@@ -213,6 +213,14 @@ impl<F: Field> Add for Blind<F> {
     }
 }
 
+impl<F: Field> Sub for Blind<F> {
+    type Output = Self;
+
+    fn sub(self, rhs: Blind<F>) -> Self {
+        Blind(self.0 - rhs.0)
+    }
+}
+
 impl<F: Field> Mul for Blind<F> {
     type Output = Self;
 
@@ -235,6 +243,12 @@ impl<F: Field> AddAssign for Blind<F> {
     }
 }
 
+impl<F: Field> SubAssign for Blind<F> {
+    fn sub_assign(&mut self, rhs: Blind<F>) {
+        self.0 -= rhs.0;
+    }
+}
+
 impl<F: Field> MulAssign for Blind<F> {
     fn mul_assign(&mut self, rhs: Blind<F>) {
         self.0 *= rhs.0;
@@ -244,6 +258,12 @@ impl<F: Field> MulAssign for Blind<F> {
 impl<F: Field> AddAssign<F> for Blind<F> {
     fn add_assign(&mut self, rhs: F) {
         self.0 += rhs;
+    }
+}
+
+impl<F: Field> SubAssign<F> for Blind<F> {
+    fn sub_assign(&mut self, rhs: F) {
+        self.0 -= rhs;
     }
 }
 

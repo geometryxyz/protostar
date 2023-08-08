@@ -5,4 +5,4 @@ mod gate;
 mod keygen;
 mod prover;
 mod shuffle;
-mod witness;
+mod transcript;

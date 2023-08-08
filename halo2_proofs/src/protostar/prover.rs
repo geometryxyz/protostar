@@ -5,78 +5,92 @@ use halo2curves::CurveAffine;
 use rand_core::RngCore;
 
 use crate::{
-    arithmetic::{lagrange_interpolate, powers},
+    arithmetic::{lagrange_interpolate, parallelize, powers},
     plonk::{Circuit, Error, FixedQuery},
     poly::{
-        commitment::{CommitmentScheme, Prover},
-        LagrangeCoeff, Polynomial, Rotation,
+        commitment::{Blind, CommitmentScheme, Params, Prover},
+        empty_lagrange, LagrangeCoeff, Polynomial, Rotation,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
 use super::{
-    error_check::{Accumulator, AccumulatorInstance, AccumulatorWitness, GateEvaluationCache},
+    error_check::{Accumulator, GateEvaluationCache},
     gate::{self, Expr},
     keygen::ProvingKey,
-    witness::{create_advice_transcript, create_instance_polys},
+    transcript::{
+        advice::create_advice_transcript,
+        compressed_verifier::{
+            create_compressed_verifier_transcript, CompressedVerifierTranscript,
+        },
+        instance::create_instance_transcript,
+        lookup::{self, create_lookup_transcript},
+    },
 };
 
-/// TODO(@adr1anh): This creates an accumulator actually
-fn create_proof<
-    Scheme: CommitmentScheme,
-    E: EncodedChallenge<Scheme::Curve>,
+/// Runs the IOP until the decision phase, and returns an `Accumulator` containing the entirety of the transcript.
+/// The result can be folded into another `Accumulator`.
+fn create_accumulator<
+    'params,
+    C: CurveAffine,
+    P: Params<'params, C>,
+    E: EncodedChallenge<C>,
     R: RngCore,
-    T: TranscriptWrite<Scheme::Curve, E>,
-    ConcreteCircuit: Circuit<Scheme::Scalar>,
+    T: TranscriptWrite<C, E>,
+    ConcreteCircuit: Circuit<C::Scalar>,
 >(
-    params: &Scheme::ParamsProver,
-    pk: &ProvingKey<Scheme::Scalar>,
+    params: &P,
+    pk: &ProvingKey<C>,
     circuit: &ConcreteCircuit,
-    instances: &[&[Scheme::Scalar]],
+    instances: &[&[C::Scalar]],
     mut rng: R,
     transcript: &mut T,
-) -> Result<Accumulator<Scheme::Scalar>, Error>
-where
-    Scheme::Scalar: FromUniformBytes<64>,
-{
+) -> Result<Accumulator<C>, Error> {
     // Hash verification key into transcript
     // pk.vk.hash_into(transcript)?;
 
-    // Create polynomials from instance and add to transcript
-    let instance_polys =
-        create_instance_polys::<Scheme, E, T>(&params, pk.cs(), instances, transcript)?;
-    // Create advice columns and add to transcript
-    let advice_transcript = create_advice_transcript::<Scheme, E, R, T, ConcreteCircuit>(
+    // Add public inputs/outputs to the transcript, and convert them to `Polynomial`s
+    let instance_transcript = create_instance_transcript(params, pk.cs(), instances, transcript)?;
+
+    // Run multi-phase IOP section to generate all `Advice` columns
+    let advice_transcript = create_advice_transcript(
         params,
-        pk.cs(),
+        pk,
         circuit,
-        instances,
-        rng,
+        &instance_transcript.instance_polys,
+        &mut rng,
         transcript,
     )?;
 
-    // Protostar specific IOP stuff
-    let n_sqrt = 1 << pk.log2_sqrt_num_rows();
-    let beta = transcript.squeeze_challenge_scalar::<Scheme::Scalar>();
-    let beta_sqrt = beta.pow_vartime([n_sqrt as u64]);
-    // TODO(@adr1anh): Commit to beta vectors
+    // Extract the gate challenges from the advice transcript
+    let challenges = advice_transcript.challenges();
 
-    let y = transcript.squeeze_challenge_scalar::<Scheme::Scalar>();
-
-    // TODO(@adr1anh): Add advice commitments
-    let new_instance =
-        AccumulatorInstance::new(pk, advice_transcript.challenges, instance_polys, *beta, *y);
-
-    // TODO(@adr1anh): Provide beta only
-    let new_witness = AccumulatorWitness::new(
+    // Run the 2-round logUp IOP for all lookup arguments
+    let lookup_transcript = create_lookup_transcript(
+        params,
         pk,
-        advice_transcript.advice_polys,
-        advice_transcript.advice_blinds,
-        powers(*beta).take(n_sqrt).collect(),
-        powers(beta_sqrt).take(n_sqrt).collect(),
+        &advice_transcript.advice_polys,
+        &instance_transcript.instance_polys,
+        &challenges,
+        rng,
+        transcript,
     );
 
-    Ok(Accumulator::new(new_instance, new_witness))
+    // Generate random column(s) to multiply each constraint
+    // so that we can compress them to a single constraint
+    let compressed_verifier_transcript = create_compressed_verifier_transcript(params, transcript);
+
+    // Challenge for the RLC of all constraints (all gates and all lookups)
+    let y = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+
+    Ok(Accumulator::new(
+        pk,
+        instance_transcript,
+        advice_transcript,
+        lookup_transcript,
+        compressed_verifier_transcript,
+        y,
+    ))
 }
 
 #[cfg(test)]
@@ -91,7 +105,6 @@ mod tests {
         protostar::shuffle::MyCircuit,
         transcript::{Blake2bWrite, Challenge255, TranscriptWriterBuffer},
     };
-    use core::num;
 
     use crate::plonk::{sealed::Phase, ConstraintSystem, FirstPhase};
     use crate::{halo2curves::pasta::pallas, plonk::sealed::SealedPhase};
@@ -102,61 +115,33 @@ mod tests {
     use rand_core::{OsRng, RngCore};
 
     #[test]
-    fn test_expression_conversion() {
+    fn test_accumulation() {
         let mut rng = OsRng;
         const W: usize = 4;
         const H: usize = 32;
         const K: u32 = 8;
-        const N: usize = 64; // could be 33?
-        let circuit1 = MyCircuit::<_, W, H>::rand(&mut rng);
-        let circuit2 = MyCircuit::<_, W, H>::rand(&mut rng);
-        let circuit3 = MyCircuit::<_, W, H>::rand(&mut rng);
+        let params = poly::ipa::commitment::ParamsIPA::<pallas::Affine>::new(K);
 
-        let params = poly::ipa::commitment::ParamsIPA::<_>::new(K);
+        let circuit1 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
+        let circuit2 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
+        let circuit3 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
+
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
-        let pk = ProvingKey::new(N, &circuit1).unwrap();
-        let r1 = create_proof::<IPACommitmentScheme<pallas::Affine>, _, _, _, _>(
-            &params,
-            &pk,
-            &circuit1,
-            &[],
-            rng,
-            &mut transcript,
-        );
-        let r2 = create_proof::<IPACommitmentScheme<pallas::Affine>, _, _, _, _>(
-            &params,
-            &pk,
-            &circuit2,
-            &[],
-            rng,
-            &mut transcript,
-        );
-        let r3 = create_proof::<IPACommitmentScheme<pallas::Affine>, _, _, _, _>(
-            &params,
-            &pk,
-            &circuit3,
-            &[],
-            rng,
-            &mut transcript,
-        );
-        assert!(r1.is_ok());
-        assert!(r2.is_ok());
-        assert!(r3.is_ok());
+        let pk = ProvingKey::new(&params, &circuit1).unwrap();
+        let mut acc =
+            create_accumulator(&params, &pk, &circuit1, &[], &mut rng, &mut transcript).unwrap();
 
-        let mut acc = r1.unwrap();
-        let acc2 = r2.unwrap();
-        let acc3 = r3.unwrap();
+        let acc2 =
+            create_accumulator(&params, &pk, &circuit2, &[], &mut rng, &mut transcript).unwrap();
+        acc.fold(&pk, acc2, &mut transcript);
 
-        acc = acc.fold(&pk, acc2);
-        acc = acc.fold(&pk, acc3);
+        let acc3 =
+            create_accumulator(&params, &pk, &circuit3, &[], &mut rng, &mut transcript).unwrap();
+        acc.fold(&pk, acc3, &mut transcript);
 
-        assert!(!acc.instance().ys.is_empty());
-        // assert!(e.first().unwrap().is_zero_vartime());
-        // assert!(e.last().unwrap().is_zero_vartime());
-
-        // for e_j in e.iter() {
-        //     transcript.write_scalar(*e_j).unwrap();
-        // }
-        // assert!(!e.is_empty());
+        let acc4 =
+            create_accumulator(&params, &pk, &circuit3, &[], &mut rng, &mut transcript).unwrap();
+        acc.fold(&pk, acc4, &mut transcript);
+        assert!(acc.decide(&params, &pk));
     }
 }
