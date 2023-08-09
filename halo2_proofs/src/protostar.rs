@@ -3,6 +3,8 @@
 mod error_check;
 mod gate;
 mod keygen;
-mod prover;
-mod shuffle;
+pub mod prover;
 mod transcript;
+
+pub use error_check::Accumulator;
+pub use keygen::ProvingKey;

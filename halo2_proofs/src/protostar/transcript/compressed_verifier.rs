@@ -21,6 +21,7 @@ use halo2curves::CurveAffine;
 /// TODO(@adr1anh): Implement variant where we commit to two vector of size sqrt(n).
 /// It is currently unsupported since the commitment scheme
 /// only allows for commitments of vectors of size n.
+#[derive(Debug)]
 pub struct CompressedVerifierTranscript<C: CurveAffine> {
     beta_poly: Polynomial<C::Scalar, LagrangeCoeff>,
     beta_commitment: C,

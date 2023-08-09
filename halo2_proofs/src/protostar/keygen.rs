@@ -21,6 +21,7 @@ use crate::{
 use super::gate::{Expr, Gate};
 
 /// Contains all fixed data for a circuit that is required to create a Protostar `Accumulator`
+#[derive(Debug)]
 pub struct ProvingKey<C: CurveAffine> {
     // maximum number of rows in the trace (including blinding factors)
     num_rows: usize,

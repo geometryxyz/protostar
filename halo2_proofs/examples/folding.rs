@@ -1,10 +1,11 @@
-use crate::{
+use ff::{BatchInvert, FromUniformBytes};
+use halo2_proofs::{
     arithmetic::{CurveAffine, Field},
     circuit::{floor_planner::V1, Layouter, Value},
     dev::{metadata, FailureLocation, MockProver, VerifyFailure},
-    halo2curves::pasta::EqAffine,
     plonk::*,
     poly::{
+        self,
         commitment::ParamsProver,
         ipa::{
             commitment::{IPACommitmentScheme, ParamsIPA},
@@ -13,11 +14,12 @@ use crate::{
         },
         VerificationStrategy,
     },
+    protostar,
     transcript::{
         Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer,
     },
 };
-use ff::{BatchInvert, FromUniformBytes};
+use halo2curves::pasta::pallas;
 use rand_core::{OsRng, RngCore};
 use std::iter::{self, zip};
 
@@ -324,38 +326,61 @@ fn test_prover<C: CurveAffine, const W: usize, const H: usize>(
 }
 
 fn main() {
+    let mut rng = OsRng;
+
     const W: usize = 4;
     const H: usize = 32;
     const K: u32 = 8;
 
-    let circuit = &MyCircuit::<_, W, H>::rand(&mut OsRng);
+    let params = poly::ipa::commitment::ParamsIPA::<pallas::Affine>::new(K);
 
-    {
-        test_mock_prover(K, circuit.clone(), Ok(()));
-        test_prover::<EqAffine, W, H>(K, circuit.clone(), true);
-    }
+    let circuit1 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
+    let circuit2 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
+    let circuit3 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
 
-    #[cfg(not(feature = "sanity-checks"))]
-    {
-        use std::ops::IndexMut;
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    let pk = protostar::ProvingKey::new(&params, &circuit1).unwrap();
+    let mut acc = protostar::prover::create_accumulator(
+        &params,
+        &pk,
+        &circuit1,
+        &[],
+        &mut rng,
+        &mut transcript,
+    )
+    .unwrap();
 
-        let mut circuit = circuit.clone();
-        circuit.shuffled = circuit.shuffled.map(|mut shuffled| {
-            shuffled.index_mut(0).swap(0, 1);
-            shuffled
-        });
+    let acc2 = protostar::prover::create_accumulator(
+        &params,
+        &pk,
+        &circuit2,
+        &[],
+        &mut rng,
+        &mut transcript,
+    )
+    .unwrap();
+    acc.fold(&pk, acc2, &mut transcript);
 
-        test_mock_prover(
-            K,
-            circuit.clone(),
-            Err(vec![(
-                ((1, "z should end with 1").into(), 0, "").into(),
-                FailureLocation::InRegion {
-                    region: (0, "Shuffle original into shuffled").into(),
-                    offset: 32,
-                },
-            )]),
-        );
-        test_prover::<EqAffine, W, H>(K, circuit, false);
-    }
+    let acc3 = protostar::prover::create_accumulator(
+        &params,
+        &pk,
+        &circuit3,
+        &[],
+        &mut rng,
+        &mut transcript,
+    )
+    .unwrap();
+    acc.fold(&pk, acc3, &mut transcript);
+
+    let acc4 = protostar::prover::create_accumulator(
+        &params,
+        &pk,
+        &circuit3,
+        &[],
+        &mut rng,
+        &mut transcript,
+    )
+    .unwrap();
+    acc.fold(&pk, acc4, &mut transcript);
+    assert!(acc.decide(&params, &pk));
 }

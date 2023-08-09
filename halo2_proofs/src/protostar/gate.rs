@@ -13,7 +13,7 @@ use crate::{
 /// If all original polynomial expressions were multiplied at the top-level by a common simple `Selector`,
 /// this latter leaf is extracted from each Gⱼ and applied only once to all sub-polynomials.
 /// In general, this undoes the transformation done by `Constraints::with_selector`.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Gate<F: Field> {
     // List of polynomial expressions Gⱼ
     pub polys: Vec<Expr<F>>,

@@ -29,6 +29,7 @@ use super::{
 
 /// An `Accumulator` contains the entirety of the IOP transcript,
 /// including commitments and verifier challenges.
+#[derive(Debug)]
 pub struct Accumulator<C: CurveAffine> {
     instance_transcript: InstanceTranscript<C>,
     advice_transcript: AdviceTranscript<C>,

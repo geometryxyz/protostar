@@ -12,6 +12,7 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
+#[derive(Debug)]
 pub struct InstanceTranscript<C: CurveAffine> {
     pub instance_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     pub instance_commitments: Option<Vec<C>>,

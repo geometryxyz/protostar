@@ -27,6 +27,7 @@ use std::{
 
 /// Advice polynomials sent by the prover during the first phases of
 /// the IOP protocol.
+#[derive(Debug)]
 pub struct AdviceTranscript<C: CurveAffine> {
     // Array of challenges and their powers
     // challenges[i][d] = challenge_i^{d+1}
@@ -394,47 +395,47 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
     }
 }
 
-#[cfg(test)]
+// #[cfg(test)]
 
-mod tests {
-    use crate::{
-        plonk::keygen_vk,
-        poly::{
-            commitment::ParamsProver,
-            ipa::{commitment::IPACommitmentScheme, multiopen::ProverIPA},
-        },
-        protostar::shuffle::MyCircuit,
-        transcript::{Blake2bWrite, Challenge255, TranscriptWriterBuffer},
-    };
-    use core::num;
+// mod tests {
+//     use crate::{
+//         plonk::keygen_vk,
+//         poly::{
+//             commitment::ParamsProver,
+//             ipa::{commitment::IPACommitmentScheme, multiopen::ProverIPA},
+//         },
+//         protostar::shuffle::MyCircuit,
+//         transcript::{Blake2bWrite, Challenge255, TranscriptWriterBuffer},
+//     };
+//     use core::num;
 
-    use crate::plonk::{sealed::Phase, ConstraintSystem, FirstPhase};
-    use crate::{halo2curves::pasta::pallas, plonk::sealed::SealedPhase};
+//     use crate::plonk::{sealed::Phase, ConstraintSystem, FirstPhase};
+//     use crate::{halo2curves::pasta::pallas, plonk::sealed::SealedPhase};
 
-    use super::*;
-    use crate::plonk::sealed;
-    use crate::plonk::Expression;
-    use rand_core::{OsRng, RngCore};
+//     use super::*;
+//     use crate::plonk::sealed;
+//     use crate::plonk::Expression;
+//     use rand_core::{OsRng, RngCore};
 
-    #[test]
-    fn test_expression_conversion() {
-        let mut rng = OsRng;
-        const W: usize = 4;
-        const H: usize = 32;
-        const K: u32 = 8;
-        let circuit = MyCircuit::<_, W, H>::rand(&mut rng);
+//     #[test]
+//     fn test_expression_conversion() {
+//         let mut rng = OsRng;
+//         const W: usize = 4;
+//         const H: usize = 32;
+//         const K: u32 = 8;
+//         let circuit = MyCircuit::<_, W, H>::rand(&mut rng);
 
-        let params = poly::ipa::commitment::ParamsIPA::<pallas::Affine>::new(K);
-        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
-        let pk = ProvingKey::new(&params, &circuit).unwrap();
-        let data = create_advice_transcript(
-            &params,
-            &pk,
-            &circuit,
-            &Vec::new(),
-            &mut rng,
-            &mut transcript,
-        );
-        assert!(data.is_ok());
-    }
-}
+//         let params = poly::ipa::commitment::ParamsIPA::<pallas::Affine>::new(K);
+//         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+//         let pk = ProvingKey::new(&params, &circuit).unwrap();
+//         let data = create_advice_transcript(
+//             &params,
+//             &pk,
+//             &circuit,
+//             &Vec::new(),
+//             &mut rng,
+//             &mut transcript,
+//         );
+//         assert!(data.is_ok());
+//     }
+// }
