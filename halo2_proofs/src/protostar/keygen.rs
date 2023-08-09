@@ -78,7 +78,7 @@ impl<C: CurveAffine> ProvingKey<C> {
 
         let mut assembly: Assembly<C::Scalar> = Assembly {
             usable_rows: 0..num_rows - (cs.blinding_factors() + 1),
-            k: params.k(),
+            k,
 
             fixed: vec![empty_lagrange_assigned(num_rows); cs.num_fixed_columns],
             permutation: permutation::keygen::Assembly::new(num_rows, &cs.permutation),

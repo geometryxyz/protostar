@@ -17,6 +17,7 @@ use crate::{
 use ff::Field;
 use group::Curve;
 use halo2curves::CurveAffine;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 use super::{
     keygen::ProvingKey,
@@ -183,7 +184,7 @@ impl<C: CurveAffine> Accumulator<C> {
             let _ = transcript.write_scalar(*coef);
         }
 
-        // TODO(@adr1anh): Get alpha challenge from transcript
+        // Get alpha challenge
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
 
         // fold challenges
@@ -223,6 +224,7 @@ impl<C: CurveAffine> Accumulator<C> {
     }
 
     /// Checks whether this accumulator is valid by recomputing all commitments and the error.
+    /// The error evaluation is not optimized since this function should only be used for debugging.
     pub fn decide<'params, P: Params<'params, C>>(&self, params: &P, pk: &ProvingKey<C>) -> bool {
         let commitments_ok = {
             let commitments_projective: Vec<_> = zip(self.polynomials_iter(), self.blinds_iter())
@@ -233,51 +235,77 @@ impl<C: CurveAffine> Accumulator<C> {
             zip(commitments, self.commitments_iter()).all(|(actual, expected)| actual == *expected)
         };
 
-        // TODO(@adr1anh): Cleanup gate evaluation before implementing the rest
-        // let num_rows_i = pk.num_rows() as i32;
-        // /// Return the index in the polynomial of size `isize` after rotation `rot`.
-        // fn get_rotation_idx(idx: usize, rot: Rotation, isize: i32) -> usize {
-        //     (((idx as i32) + rot.0).rem_euclid(isize)) as usize
-        // }
+        /// Return the index in the polynomial of size `isize` after rotation `rot`.
+        fn get_rotation_idx(idx: usize, rot: Rotation, isize: i32) -> usize {
+            (((idx as i32) + rot.0).rem_euclid(isize)) as usize
+        }
 
-        // let mut errors = vec![C::Scalar::ZERO; pk.num_usable_rows()];
-        // parallelize(&mut errors, |errors, start| {
-        //     let mut es: Vec<_> = pk
-        //         .gates()
-        //         .iter()
-        //         .map(|gate| vec![C::Scalar::ZERO; gate.polys.len()])
-        //         .collect();
-        //     for (i, e) in errors.iter_mut().enumerate() {
-        //         let row = start + i;
+        // evaluate the error at each row
+        let mut errors = vec![C::Scalar::ZERO; pk.num_usable_rows()];
 
-        //         for (gate, es) in zip(pk.gates().iter(), es.iter_mut()) {
-        //             if let Some(simple_selector) = gate.simple_selector {
-        //                 let selector_column = simple_selector.0;
-        //                 let value = pk.selectors[selector_column][row];
-        //                 // do nothing and return
-        //                 if !value {
-        //                     continue;
-        //                 }
-        //             }
-        //         }
+        parallelize(&mut errors, |errors, start| {
+            let num_rows_i = pk.num_rows() as i32;
 
-        //         // let e_single = poly.evaluate(
-        //         //     &|constant| constant,
-        //         //     &|selector_idx| if pk.selectors[selector_idx][idx]{C::Scalar::ONE} else {C::Scalar::ZERO},
-        //         //     &|fixed_idx| pk.fixed[fixed_idx],
-        //         //     &|advice_idx| advice_tmp[advice_idx],
-        //         //     &|instance_idx| instance_tmp[instance_idx],
-        //         //     &|challenge_idx, challenge_power| {
-        //         //         self.challenge_powers_evals[eval_idx][challenge_idx][challenge_power - 1]
-        //         //     },
-        //         //     &|negated| -negated,
-        //         //     &|sum_a, sum_b| sum_a + sum_b,
-        //         //     &|prod_a, prod_b| prod_a * prod_b,
-        //         //     &|scaled, v| scaled * v,)
-        //     }
-        // });
+            let polys: Vec<_> = pk
+                .cs()
+                .gates()
+                .iter()
+                .flat_map(|gate| {
+                    gate.polynomials()
+                        .iter()
+                        .map(|poly| poly.clone().merge_challenge_products())
+                })
+                .collect();
+            let ys = self.ys.clone();
 
-        commitments_ok
+            let mut es: Vec<_> = vec![C::Scalar::ZERO; polys.len()];
+            for (i, error) in errors.iter_mut().enumerate() {
+                let row = start + i;
+
+                for (e, poly) in zip(es.iter_mut(), polys.iter()) {
+                    *e = poly.evaluate(
+                        &|constant| constant,
+                        &|selector| {
+                            if pk.selectors[selector.0][row] {
+                                C::Scalar::ONE
+                            } else {
+                                C::Scalar::ZERO
+                            }
+                        },
+                        &|query| {
+                            pk.fixed[query.column_index()]
+                                [get_rotation_idx(row, query.rotation(), num_rows_i)]
+                        },
+                        &|query| {
+                            self.advice_transcript.advice_polys[query.column_index()]
+                                [get_rotation_idx(row, query.rotation(), num_rows_i)]
+                        },
+                        &|query| {
+                            self.instance_transcript.instance_polys[query.column_index()]
+                                [get_rotation_idx(row, query.rotation(), num_rows_i)]
+                        },
+                        &|challenge| {
+                            self.advice_transcript.challenges[challenge.index()]
+                                [challenge.power() - 1]
+                        },
+                        &|negated| -negated,
+                        &|sum_a, sum_b| sum_a + sum_b,
+                        &|prod_a, prod_b| prod_a * prod_b,
+                        &|scaled, v| scaled * v,
+                    );
+                }
+
+                *error =
+                    zip(ys.iter(), es.iter()).fold(C::Scalar::ZERO, |acc, (y, e)| acc + *y * e);
+                *error *= self.compressed_verifier_transcript.beta_poly()[row];
+            }
+        });
+
+        let error = errors.par_iter().sum::<C::Scalar>();
+
+        let error_ok = error == self.error;
+
+        commitments_ok & error_ok
     }
 
     pub fn challenges_iter(&self) -> impl Iterator<Item = &C::Scalar> {
