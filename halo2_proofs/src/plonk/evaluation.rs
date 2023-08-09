@@ -16,7 +16,6 @@ use group::{
     ff::{BatchInvert, Field, PrimeField, WithSmallOrderMulGroup},
     Curve,
 };
-use std::any::TypeId;
 use std::convert::TryInto;
 use std::num::ParseIntError;
 use std::slice;

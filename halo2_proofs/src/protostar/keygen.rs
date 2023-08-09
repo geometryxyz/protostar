@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-use super::gate::{Expr, Gate};
+use super::gate::Gate;
 
 /// Contains all fixed data for a circuit that is required to create a Protostar `Accumulator`
 #[derive(Debug)]
@@ -212,15 +212,21 @@ impl<C: CurveAffine> ProvingKey<C> {
     /// Returns a vector of same size as `num_challenges` where each entry
     /// is equal to the highest power `d` that a challenge appears over all `Gate`s
     pub fn max_challenge_powers(&self) -> Vec<usize> {
-        let mut max_challenge_power = vec![0; self.num_challenges()];
-        // Iterate over all polynomials in all `Gate`s
-        for poly in self.gates.iter().flat_map(|gate| gate.polys.iter()) {
-            poly.traverse(&mut |v| {
-                if let Expr::Challenge(c, d) = v {
-                    max_challenge_power[*c] = std::cmp::max(max_challenge_power[*c], *d);
-                }
-            });
+        let num_challenges = self.num_challenges();
+        let mut max_challenge_power = vec![0; num_challenges];
+
+        for poly in self
+            .cs()
+            .gates()
+            .iter()
+            .flat_map(|gate| gate.polynomials().iter())
+        {
+            for (idx, max_power) in max_challenge_power.iter_mut().enumerate() {
+                let new_power = poly.max_challenge_power(idx);
+                *max_power = std::cmp::max(*max_power, new_power);
+            }
         }
+
         max_challenge_power
     }
 

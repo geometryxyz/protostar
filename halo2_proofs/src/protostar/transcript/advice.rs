@@ -194,9 +194,9 @@ pub fn create_advice_transcript<
 
     let challenge_degrees = pk.max_challenge_powers();
     let challenges = challenges
-        .iter()
+        .into_iter()
         .zip(challenge_degrees)
-        .map(|(c, d)| powers(*c).skip(1).take(d).collect::<Vec<_>>())
+        .map(|(c, d)| powers(c).skip(1).take(d).collect::<Vec<_>>())
         .collect::<Vec<_>>();
 
     Ok(AdviceTranscript {

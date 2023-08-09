@@ -25,11 +25,8 @@ pub struct GateEvaluationCache<F: Field> {
     // Maximum of `num_evals`
     max_num_evals: usize,
 
-    // `challenge_powers_evals[X][j][d]` = (1-X)⋅c'ⱼᵈ + X⋅cⱼᵈ
-    // - X = 0, 1, ..., max_num_evals - 1`
-    // - j = 0, 1, ..., num_challenges - 1`
-    // - d = 0, 1, ..., max_challenge_power[j] - 1`
-    challenge_powers_evals: Vec<Vec<Vec<F>>>,
+    // Evaluations of the challenges queried by the gate
+    challenge_evals: Vec<Vec<F>>,
 
     // Cache for storing the fixed, accumulated, and witness values for evaluating this
     // `gate` at a single row.
@@ -83,14 +80,22 @@ impl<F: Field> GateEvaluationCache<F> {
         // maximum number of evaluations over all Gⱼ(X)
         let max_num_evals = max_poly_degree + 1 + num_extra_evaluations;
 
-        // Challenge evaluations: challenge_powers_evals[X][j][power] =
-        //  challenges_acc[j][power] + X⋅challenges_new[j]^power
-        // for
-        //    X     = 0, 1, ..., max_num_evals   - 1
-        //    j     = 0, 1, ..., num_challenges  - 1
-        //    power = 0, 1, ..., max_poly_degree
-        let challenge_powers_evals =
-            evaluated_challenge_powers(acc_challenges, new_challenges, max_num_evals);
+        let acc_queried_challenges: Vec<_> = gate
+            .queried_challenges
+            .iter()
+            .map(|c| acc_challenges[c.index()][c.power() - 1])
+            .collect();
+        let new_queried_challenges: Vec<_> = gate
+            .queried_challenges
+            .iter()
+            .map(|c| new_challenges[c.index()][c.power() - 1])
+            .collect();
+
+        let challenge_evals = evaluatuated_challenges(
+            &acc_queried_challenges,
+            &new_queried_challenges,
+            max_num_evals,
+        );
 
         // for each polynomial, allocate a buffer for storing all the evaluations
         let gate_eval = num_evals
@@ -102,7 +107,7 @@ impl<F: Field> GateEvaluationCache<F> {
             gate: gate.clone(),
             num_evals,
             max_num_evals,
-            challenge_powers_evals,
+            challenge_evals,
             simple_selector: None,
             selectors: vec![F::ZERO; gate.queried_selectors.len()],
             fixed: vec![F::ZERO; gate.queried_fixed.len()],
@@ -234,9 +239,7 @@ impl<F: Field> GateEvaluationCache<F> {
                     &|fixed_idx| self.fixed[fixed_idx],
                     &|advice_idx| advice_tmp[advice_idx],
                     &|instance_idx| instance_tmp[instance_idx],
-                    &|challenge_idx, challenge_power| {
-                        self.challenge_powers_evals[eval_idx][challenge_idx][challenge_power - 1]
-                    },
+                    &|challenge_idx| self.challenge_evals[eval_idx][challenge_idx],
                     &|negated| -negated,
                     &|sum_a, sum_b| sum_a + sum_b,
                     &|prod_a, prod_b| prod_a * prod_b,
@@ -266,23 +269,19 @@ impl<F: Field> GateEvaluationCache<F> {
 ///    X     = 0, 1, ..., num_evals       - 1
 ///    j     = 0, 1, ..., num_challenges  - 1
 ///    power = 0, 1, ...,
-pub fn evaluated_challenge_powers<F: Field>(
-    challenges_acc: &[Vec<F>],
-    challenges_new: &[Vec<F>],
+fn evaluatuated_challenges<F: Field>(
+    challenges_acc: &[F],
+    challenges_new: &[F],
     num_evals: usize,
-) -> Vec<Vec<Vec<F>>> {
+) -> Vec<Vec<F>> {
     debug_assert_eq!(
         challenges_acc.len(),
         challenges_new.len(),
         "number of challenges in both accumulators must be the same"
     );
 
-    let challenges_diff: Vec<Vec<_>> = zip(challenges_acc.iter(), challenges_new.iter())
-        .map(|(c_acc, c_new)| {
-            zip(c_acc.iter(), c_new.iter())
-                .map(|(c_acc, c_new)| *c_new - c_acc)
-                .collect()
-        })
+    let challenges_diff: Vec<_> = zip(challenges_acc.iter(), challenges_new.iter())
+        .map(|(c_acc, c_new)| *c_new - c_acc)
         .collect();
 
     let mut challenge_powers_evals = Vec::with_capacity(num_evals);
@@ -297,13 +296,7 @@ pub fn evaluated_challenge_powers<F: Field>(
         let prev_evals = &challenge_powers_evals[eval - 1];
         // compute next row by adding `new` to the previous row
         let curr_eval = zip(prev_evals.iter(), challenges_diff.iter())
-            .map(|(prev_powers_j, diff_powers_j)| {
-                // `prev_powers_j` and `new_powers_j` are vectors of the powers of the challenge j
-                // this loop adds them up to get the evaluation
-                zip(prev_powers_j.iter(), diff_powers_j.iter())
-                    .map(|(prev, diff)| *prev + diff)
-                    .collect()
-            })
+            .map(|(prev, diff)| *prev + diff)
             .collect();
 
         challenge_powers_evals.push(curr_eval);
@@ -311,3 +304,5 @@ pub fn evaluated_challenge_powers<F: Field>(
 
     challenge_powers_evals
 }
+
+

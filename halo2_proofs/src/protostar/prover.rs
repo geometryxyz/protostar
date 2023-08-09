@@ -16,7 +16,6 @@ use crate::{
 
 use super::{
     error_check::Accumulator,
-    gate::{self, Expr},
     keygen::ProvingKey,
     transcript::{
         advice::create_advice_transcript,
@@ -24,7 +23,7 @@ use super::{
             create_compressed_verifier_transcript, CompressedVerifierTranscript,
         },
         instance::create_instance_transcript,
-        lookup::{self, create_lookup_transcript},
+        lookup::create_lookup_transcript,
     },
 };
 
