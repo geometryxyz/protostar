@@ -6,15 +6,15 @@ use std::{
 };
 mod gate;
 use crate::{
-    arithmetic::{field_integers, lagrange_interpolate, parallelize, powers},
+    arithmetic::{field_integers, parallelize, powers},
     poly::{
         commitment::{Blind, CommitmentScheme, Params},
         empty_lagrange, LagrangeCoeff, Polynomial, Rotation,
     },
-    protostar::error_check::gate::{Gate, GateEvaluationCache},
+    protostar::error_check::gate::GateEvaluator,
     transcript::{EncodedChallenge, TranscriptWrite},
 };
-use ff::Field;
+use ff::{BatchInvert, Field};
 use group::Curve;
 use halo2curves::CurveAffine;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
@@ -53,32 +53,6 @@ impl<C: CurveAffine> Accumulator<C> {
         compressed_verifier_transcript: CompressedVerifierTranscript<C>,
         y: C::Scalar,
     ) -> Self {
-        // #[cfg(feature = "sanity-checks")]
-        // {
-        //     assert_eq!(
-        //         challenges.len(),
-        //         pk.num_challenges(),
-        //         "invalid number of challenges supplied"
-        //     );
-        //     assert_eq!(
-        //         instance.len(),
-        //         pk.num_instance_columns(),
-        //         "invalid number of instance columns supplied"
-        //     );
-
-        //     for (i, (instance_len, expected_len)) in zip(
-        //         instance.iter().map(|instance| instance.len()),
-        //         pk.num_instance_rows().iter(),
-        //     )
-        //     .enumerate()
-        //     {
-        //         assert_eq!(
-        //             instance_len, *expected_len,
-        //             "invalid size for instance column {i}"
-        //         );
-        //     }
-        // }
-
         let ys: Vec<_> = powers(y).skip(1).take(pk.num_constraints()).collect();
 
         Self {
@@ -101,12 +75,12 @@ impl<C: CurveAffine> Accumulator<C> {
         // 1 for beta, 1 for y
         let num_extra_evaluations = 2;
 
-        let gates: Vec<Gate<_>> = pk.cs().gates().iter().map(Gate::from).collect();
-
-        let mut gate_caches: Vec<_> = gates
+        let mut gate_caches: Vec<_> = pk
+            .cs()
+            .gates()
             .iter()
             .map(|gate| {
-                GateEvaluationCache::new(
+                GateEvaluator::new(
                     gate,
                     &self.advice_transcript.challenges,
                     &new.advice_transcript.challenges,
@@ -141,33 +115,49 @@ impl<C: CurveAffine> Accumulator<C> {
                     for (acc_error_poly, new_error_poly) in
                         zip(error_polys[gate_idx].iter_mut(), evals.iter())
                     {
-                        // Multiply each poly by b1*b2 and add it to the corresponding accumulator
-                        acc_error_poly.add_multiplied(new_error_poly, &beta_evals);
+                        // Multiply each poly by beta and add it to the corresponding accumulator
+                        for (acc_error_eval, (new_error_eval, beta_eval)) in acc_error_poly
+                            .iter_mut()
+                            .zip(zip(new_error_poly.iter(), beta_evals.iter()))
+                        {
+                            *acc_error_eval += *new_error_eval * beta_eval;
+                        }
                     }
                 }
             }
         }
 
-        let final_poly = {
-            let mut final_poly = vec![C::Scalar::ZERO; num_evals];
+        // collect all lists of evaluations
+        let mut final_evals: Vec<_> = error_polys
+            .into_iter()
+            .flat_map(|poly| poly.into_iter())
+            .collect();
 
-            // TODO(@adr1anh): The inner loop can be optimized since `to_coefficients` does a lot of common preprocessing.
-            for (evals, (y_acc, y_new)) in error_polys
-                .iter_mut()
-                .flat_map(|polys| polys.iter_mut())
-                .zip(zip(self.ys.iter(), new.ys.iter()))
-            {
-                // Multiply e_j(X) by y_j
-                evals.multiply_by_challenge_var(*y_acc, *y_new);
-                // Obtain the coefficients of the polynomial
-                let coeffs = evals.to_coefficients();
-                // Add the coefficients to the final accumulator
-                for (final_coeff, coeff) in zip(final_poly.iter_mut(), coeffs.iter()) {
-                    *final_coeff += coeff;
+        // multiply each list of evaluations by the challenge y
+        final_evals
+            .iter_mut()
+            .zip(zip(self.ys.iter(), new.ys.iter()))
+            .for_each(|(evals, (y_acc, y_new))| {
+                let y_evals_iter = boolean_evaluations(*y_acc, *y_new);
+                for (error_eval, y_eval) in zip(evals.iter_mut(), y_evals_iter) {
+                    *error_eval *= y_eval;
                 }
-            }
-            final_poly
-        };
+            });
+
+        // convert evaluations into coefficients
+        let final_polys = batch_lagrange_interpolate_integers(&final_evals);
+
+        // add all polynomials together
+        let final_poly = final_polys.into_iter().fold(
+            vec![C::Scalar::ZERO; num_evals],
+            |mut final_poly, coeffs| {
+                final_poly
+                    .iter_mut()
+                    .zip(coeffs.iter())
+                    .for_each(|(final_coeff, coeff)| *final_coeff += coeff);
+                final_poly
+            },
+        );
 
         // The error term for the existing accumulator should be e(0),
         // which is equal to the first coefficient of `final_poly`
@@ -409,107 +399,90 @@ impl<C: CurveAffine> Accumulator<C> {
     }
 }
 
-// This could be more general, i.e. a
-// - the evaluation of a row
-// - eval of a challenge
-pub struct ErrorEvaluations<F: Field> {
-    evals: Vec<F>,
-}
-
-impl<F: Field> ErrorEvaluations<F> {
-    pub fn new(num_evals: usize) -> Self {
-        Self {
-            evals: vec![F::ZERO; num_evals],
-        }
-    }
-
-    pub fn num_evals(&self) -> usize {
-        self.evals.len()
-    }
-
-    pub fn multiply_by_challenge_var(&mut self, c_acc: F, c_new: F) {
-        let c_evals_iter = boolean_evaluations(c_acc, c_new);
-        for (e, c) in zip(self.evals.iter_mut(), c_evals_iter) {
-            *e *= c;
-        }
-    }
-
-    pub fn add_multiplied(&mut self, other: &ErrorEvaluations<F>, scalar_evals: &[F]) {
-        for (s, (o, m)) in self
-            .evals
-            .iter_mut()
-            .zip(zip(other.evals.iter(), scalar_evals.iter()))
-        {
-            *s += *m * o;
-        }
-    }
-
-    pub fn to_coefficients(&self) -> Vec<F> {
-        let points: Vec<_> = field_integers().take(self.evals.len()).collect();
-        lagrange_interpolate(&points, &self.evals)
-    }
-}
-
 /// For a linear polynomial p(X) such that p(0) = eval0, p(1) = eval1,
-/// return an iterator yielding the evaluations p(j) for j=0,1,...
+/// return an iterator yielding the evaluations p(j) for j = 0, 1, ... .
 fn boolean_evaluations<F: Field>(eval0: F, eval1: F) -> impl Iterator<Item = F> {
     let linear = eval1 - eval0;
     std::iter::successors(Some(eval0), move |acc| Some(linear + acc))
 }
 
-// /// Non-comforming iterator yielding evaluations of
-// /// (acc.β₀ + X⋅new.β₀)⋅(acc.β₁ + X⋅new.β₁)
-// struct BetaIterator<'a, 'b, F: Field> {
-//     betas0_acc: &'a [F],
-//     betas1_acc: &'a [F],
-//     betas0_new: &'b [F],
-//     betas1_new: &'b [F],
+/// For a sequence of linear polynomial p_k(X) such that p_k(0) = evals0[k], p_k(1) = evals1[k],
+/// return an iterator yielding a vector of evaluations [p_0(j), p_1(j), ...] for j = 0, 1, ... .
+fn boolean_evaluations_vec<F: Field>(evals0: &[F], evals1: &[F]) -> impl Iterator<Item = Vec<F>> {
+    assert_eq!(evals0.len(), evals1.len());
+    let diff: Vec<_> = zip(evals0.iter(), evals1.iter())
+        .map(|(eval0, eval1)| *eval1 - eval0)
+        .collect();
+    std::iter::successors(Some(evals0.to_vec()), move |acc| {
+        Some(
+            zip(acc.iter(), diff.iter())
+                .map(|(acc, diff)| *acc + diff)
+                .collect(),
+        )
+    })
+}
 
-//     // log2(n^{1/2})
-//     k_sqrt: u32,
-//     // 2^k_sqrt - 1
-//     mask: usize,
+/// Returns coefficients of an n - 1 degree polynomial given a set of n points
+/// and their evaluations. This function will panic if two values in `points`
+/// are the same.
+pub fn batch_lagrange_interpolate_integers<F: Field>(evals: &[Vec<F>]) -> Vec<Vec<F>> {
+    let num_evals: Vec<_> = evals.iter().map(|evals| evals.len()).collect();
+    let max_num_evals = *num_evals.iter().max().unwrap();
 
-//     evals: Vec<F>,
-// }
+    let points: Vec<F> = field_integers().take(max_num_evals).collect();
 
-// impl<'a, 'b, F: Field> BetaIterator<'a, 'b, F> {
-//     fn new(
-//         betas0_acc: &'a [F],
-//         betas1_acc: &'a [F],
-//         betas0_new: &'b [F],
-//         betas1_new: &'b [F],
-//         k_sqrt: u32,
-//         num_evals: usize,
-//     ) -> Self {
-//         let n_sqrt = 1 << k_sqrt;
-//         let mask = n_sqrt - 1;
-//         Self {
-//             betas0_acc,
-//             betas1_acc,
-//             betas0_new,
-//             betas1_new,
-//             k_sqrt,
-//             mask,
-//             evals: vec![F::ZERO; num_evals],
-//         }
-//     }
+    let mut denoms = Vec::with_capacity(points.len());
+    for (j, x_j) in points.iter().enumerate() {
+        let mut denom = Vec::with_capacity(points.len() - 1);
+        for x_k in points
+            .iter()
+            .enumerate()
+            .filter(|&(k, _)| k != j)
+            .map(|a| a.1)
+        {
+            denom.push(*x_j - x_k);
+        }
+        denoms.push(denom);
+    }
+    // Compute (x_j - x_k)^(-1) for each j != i
+    denoms.iter_mut().flat_map(|v| v.iter_mut()).batch_invert();
 
-//     fn evals_at_row(&mut self, row_index: usize) -> &[F] {
-//         let i0 = row_index & self.mask;
-//         let i1 = row_index >> self.k_sqrt;
-//         let mut beta0 = self.betas0_acc[i0];
-//         let mut beta1 = self.betas1_acc[i1];
-//         let beta0_new = self.betas0_new[i0];
-//         let beta1_new = self.betas1_new[i1];
+    let mut final_polys: Vec<_> = num_evals
+        .iter()
+        .map(|num_evals| vec![F::ZERO; *num_evals])
+        .collect();
 
-//         self.evals[0] = beta0 * beta1;
-//         for i in 1..self.evals.len() {
-//             beta0 += beta0_new;
-//             beta1 += beta1_new;
-//             self.evals[i] = beta0 * beta1;
-//         }
+    for (final_poly, evals) in final_polys.iter_mut().zip(evals.iter()) {
+        for (j, (denoms, eval)) in denoms.iter().zip(evals.iter()).enumerate() {
+            let mut tmp: Vec<F> = Vec::with_capacity(evals.len());
+            let mut product = Vec::with_capacity(evals.len() - 1);
+            tmp.push(F::ONE);
+            for (x_k, denom) in points
+                .iter()
+                .take(evals.len())
+                .enumerate()
+                .filter(|&(k, _)| k != j)
+                .map(|a| a.1)
+                .zip(denoms.iter())
+            {
+                product.resize(tmp.len() + 1, F::ZERO);
+                for ((a, b), product) in tmp
+                    .iter()
+                    .chain(std::iter::once(&F::ZERO))
+                    .zip(std::iter::once(&F::ZERO).chain(tmp.iter()))
+                    .zip(product.iter_mut())
+                {
+                    *product = *a * (-*denom * x_k) + *b * *denom;
+                }
+                std::mem::swap(&mut tmp, &mut product);
+            }
+            assert_eq!(tmp.len(), evals.len());
+            assert_eq!(product.len(), evals.len() - 1);
+            for (final_coeff, interpolation_coeff) in final_poly.iter_mut().zip(tmp.into_iter()) {
+                *final_coeff += interpolation_coeff * eval;
+            }
+        }
+    }
 
-//         self.evals.as_slice()
-//     }
-// }
+    final_polys
+}

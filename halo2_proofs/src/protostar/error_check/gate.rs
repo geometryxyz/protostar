@@ -4,19 +4,30 @@ use ff::Field;
 use halo2curves::CurveAffine;
 
 use crate::{
-    plonk::{AdviceQuery, Challenge, Expression, FixedQuery, InstanceQuery, Selector},
+    plonk::{AdviceQuery, Challenge, Expression, FixedQuery, Gate, InstanceQuery, Selector},
     poly::Rotation,
     protostar::keygen::ProvingKey,
 };
 
-use super::{Accumulator, ErrorEvaluations};
+use super::{boolean_evaluations_vec, Accumulator};
 
 /// When evaluating a `Gate` over all rows, we fetch the input data from the previous accumulator
 /// and the new witness and store it in this struct.
 /// This struct can be cloned when paralellizing the evaluation over chunks of rows,
 /// so that each chunk operates over independent data.
-pub struct GateEvaluationCache<F: Field> {
-    pub gate: Gate<F>,
+/// // /// A Protostar `Gate` augments the structure of a `plonk::Gate` to allow for more efficient evaluation.
+/// Stores the different polynomial expressions Gⱼ for the gate.
+/// Each Gⱼ is represented as tree where nodes point to indices of elements of the `queried_*` vectors.
+/// If all original polynomial expressions were multiplied at the top-level by a common simple `Selector`,
+/// this latter leaf is extracted from each Gⱼ and applied only once to all sub-polynomials.
+/// In general, this undoes the transformation done by `Constraints::with_selector`.
+/// Create an augmented Protostar gate from a `plonk::Gate`.
+/// - Extract the common top-level `Selector` if it exists
+/// - Extract all queries, and replace leaves with indices to the queries stored in the gate
+/// - Flatten challenges so that a product of the same challenge is replaced by a power of that challenge
+/// TODO(@adr1anh): Cleanup this comment mess
+
+pub struct GateEvaluator<F: Field> {
     // Number of evaluations requried to recover each `poly` in `gate`.
     // Equal to `poly.degree() + 1 + num_extra_evaluations`,
     // which is the number of coefficients of the polynomial,
@@ -25,6 +36,17 @@ pub struct GateEvaluationCache<F: Field> {
     num_evals: Vec<usize>,
     // Maximum of `num_evals`
     max_num_evals: usize,
+
+    // List of polynomial expressions Gⱼ
+    polys: Vec<Expr<F>>,
+
+    // List of all columns queried by the polynomial expressions Gⱼ
+    // Simple `Selector` which multiplies all Gⱼ
+    queried_simple_selector: Option<Selector>,
+    queried_selectors: Vec<Selector>,
+    queried_fixed: Vec<FixedQuery>,
+    queried_instance: Vec<InstanceQuery>,
+    queried_advice: Vec<AdviceQuery>,
 
     // Evaluations of the challenges queried by the gate
     challenge_evals: Vec<Vec<F>>,
@@ -52,10 +74,10 @@ pub struct GateEvaluationCache<F: Field> {
     // For each `poly` at index `j` in `gate`,
     // store the evaluations of the error polynomial `e_j(X)`
     // at X = 0, 1, ..., num_evals[j] - 1 in `gate_eval[j][X]`
-    pub gate_eval: Vec<ErrorEvaluations<F>>,
+    pub gate_eval: Vec<Vec<F>>,
 }
 
-impl<F: Field> GateEvaluationCache<F> {
+impl<F: Field> GateEvaluator<F> {
     /// Initialize a chache for a given `Gate` for combining an existing accumulator with
     /// the data from a new transcript.
     /// Evaluations of the linear combination of the slack and challenge variables
@@ -68,54 +90,117 @@ impl<F: Field> GateEvaluationCache<F> {
         new_challenges: &[Vec<F>],
         num_extra_evaluations: usize,
     ) -> Self {
+        // Recover common simple `Selector` from the `Gate`, along with the branch `Expression`s  it selects
+        let (polys, queried_simple_selector) = gate.extract_simple_selector();
+
+        // Merge products of challenges
+        let polys: Vec<_> = polys
+            .into_iter()
+            .map(|poly| poly.merge_challenge_products())
+            .collect();
+
+        let degrees: Vec<_> = polys.iter().map(|poly| poly.folding_degree()).collect();
+
+        let mut queried_selectors = BTreeSet::<Selector>::new();
+        let mut queried_fixed = BTreeSet::<FixedQuery>::new();
+        let mut queried_challenges = BTreeSet::<Challenge>::new();
+        let mut queried_instance = BTreeSet::<InstanceQuery>::new();
+        let mut queried_advice = BTreeSet::<AdviceQuery>::new();
+
+        // Collect all common queries for the set of polynomials in `gate`
+        for poly in polys.iter() {
+            poly.traverse(&mut |e| match e {
+                Expression::Selector(v) => {
+                    queried_selectors.insert(*v);
+                }
+                Expression::Fixed(v) => {
+                    queried_fixed.insert(*v);
+                }
+                Expression::Challenge(v) => {
+                    queried_challenges.insert(*v);
+                }
+                Expression::Instance(v) => {
+                    queried_instance.insert(*v);
+                }
+                Expression::Advice(v) => {
+                    queried_advice.insert(*v);
+                }
+                _ => {}
+            });
+        }
+        // Convert the sets of queries into sorted vectors
+        let queried_selectors: Vec<_> = queried_selectors.into_iter().collect();
+        let queried_fixed: Vec<_> = queried_fixed.into_iter().collect();
+        let queried_challenges: Vec<_> = queried_challenges.into_iter().collect();
+        let queried_instance: Vec<_> = queried_instance.into_iter().collect();
+        let queried_advice: Vec<_> = queried_advice.into_iter().collect();
+        // allocate buffers for storing gate valuess
+        let selectors = vec![F::ZERO; queried_selectors.len()];
+        let fixed = vec![F::ZERO; queried_fixed.len()];
+        let instance_acc = vec![F::ZERO; queried_instance.len()];
+        let instance_diff = vec![F::ZERO; queried_instance.len()];
+        let advice_acc = vec![F::ZERO; queried_advice.len()];
+        let advice_diff = vec![F::ZERO; queried_advice.len()];
+
+        // get homogenized and degree-flattened expressions
+        let polys: Vec<_> = polys
+            .iter()
+            // convert Expression to Expr, replacing each query node by its index in the given vectors
+            .map(|e| {
+                e.to_expr(
+                    &queried_selectors,
+                    &queried_fixed,
+                    &queried_challenges,
+                    &queried_instance,
+                    &queried_advice,
+                )
+            })
+            .collect();
+
         // Each `poly` Gⱼ(X) has degree dⱼ and dⱼ+1 coefficients,
         // therefore we need at least dⱼ+1 evaluations of Gⱼ(X) to recover
         // the coefficients.
-        let num_evals: Vec<_> = gate
-            .degrees
+        let num_evals: Vec<_> = degrees
             .iter()
             .map(|d| d + 1 + num_extra_evaluations)
             .collect();
-        // d = maxⱼ{dⱼ}
-        let max_poly_degree = *gate.degrees.iter().max().unwrap();
         // maximum number of evaluations over all Gⱼ(X)
-        let max_num_evals = max_poly_degree + 1 + num_extra_evaluations;
+        let max_num_evals = *num_evals.iter().max().unwrap();
 
-        let acc_queried_challenges: Vec<_> = gate
-            .queried_challenges
+        let acc_queried_challenges: Vec<_> = queried_challenges
             .iter()
             .map(|c| acc_challenges[c.index()][c.power() - 1])
             .collect();
-        let new_queried_challenges: Vec<_> = gate
-            .queried_challenges
+        let new_queried_challenges: Vec<_> = queried_challenges
             .iter()
             .map(|c| new_challenges[c.index()][c.power() - 1])
             .collect();
 
-        let challenge_evals = evaluatuated_challenges(
-            &acc_queried_challenges,
-            &new_queried_challenges,
-            max_num_evals,
-        );
+        let challenge_evals: Vec<_> =
+            boolean_evaluations_vec(&acc_queried_challenges, &new_queried_challenges)
+                .take(max_num_evals)
+                .collect();
 
         // for each polynomial, allocate a buffer for storing all the evaluations
-        let gate_eval = num_evals
-            .iter()
-            .map(|d| ErrorEvaluations::new(*d))
-            .collect();
+        let gate_eval = num_evals.iter().map(|d| vec![F::ZERO; *d]).collect();
 
         Self {
-            gate: gate.clone(),
             num_evals,
             max_num_evals,
+            polys,
+            queried_simple_selector,
+            queried_selectors,
+            queried_fixed,
+            queried_instance,
+            queried_advice,
             challenge_evals,
             simple_selector: None,
-            selectors: vec![F::ZERO; gate.queried_selectors.len()],
-            fixed: vec![F::ZERO; gate.queried_fixed.len()],
-            instance_acc: vec![F::ZERO; gate.queried_instance.len()],
-            instance_diff: vec![F::ZERO; gate.queried_instance.len()],
-            advice_acc: vec![F::ZERO; gate.queried_advice.len()],
-            advice_diff: vec![F::ZERO; gate.queried_advice.len()],
+            selectors,
+            fixed,
+            instance_acc,
+            instance_diff,
+            advice_acc,
+            advice_diff,
             gate_eval,
         }
     }
@@ -137,7 +222,7 @@ impl<F: Field> GateEvaluationCache<F> {
         }
 
         // Check if the gate is guarded by a simple selector and whether it is active
-        if let Some(simple_selector) = self.gate.simple_selector {
+        if let Some(simple_selector) = self.queried_simple_selector {
             let selector_column = simple_selector.0;
             let value = pk.selectors[selector_column][row];
             self.simple_selector = Some(value);
@@ -148,21 +233,21 @@ impl<F: Field> GateEvaluationCache<F> {
         }
 
         // Fill selectors
-        for (i, selector) in self.gate.queried_selectors.iter().enumerate() {
+        for (i, selector) in self.queried_selectors.iter().enumerate() {
             let selector_column = selector.0;
             let value = pk.selectors[selector_column][row];
             self.selectors[i] = if value { F::ONE } else { F::ZERO };
         }
 
         // Fill fixed
-        for (i, fixed) in self.gate.queried_fixed.iter().enumerate() {
+        for (i, fixed) in self.queried_fixed.iter().enumerate() {
             let fixed_column = fixed.column_index();
             let fixed_row = get_rotation_idx(row, fixed.rotation(), isize);
             self.fixed[i] = pk.fixed[fixed_column][fixed_row];
         }
 
         // Fill instance
-        for (i, instance) in self.gate.queried_instance.iter().enumerate() {
+        for (i, instance) in self.queried_instance.iter().enumerate() {
             let instance_column = instance.column_index();
             let instance_row = get_rotation_idx(row, instance.rotation(), isize);
             self.instance_acc[i] =
@@ -173,7 +258,7 @@ impl<F: Field> GateEvaluationCache<F> {
         }
 
         // Fill advice
-        for (i, advice) in self.gate.queried_advice.iter().enumerate() {
+        for (i, advice) in self.queried_advice.iter().enumerate() {
             let advice_column = advice.column_index();
             let advice_row = get_rotation_idx(row, advice.rotation(), isize);
             self.advice_acc[i] = acc.advice_transcript.advice_polys[advice_column][advice_row];
@@ -193,7 +278,7 @@ impl<F: Field> GateEvaluationCache<F> {
         pk: &ProvingKey<C>,
         acc: &Accumulator<C>,
         new: &Accumulator<C>,
-    ) -> Option<&[ErrorEvaluations<F>]>
+    ) -> Option<&[Vec<F>]>
     where
         C: CurveAffine<ScalarExt = F>,
     {
@@ -226,7 +311,7 @@ impl<F: Field> GateEvaluationCache<F> {
             }
             // Iterate over each polynomial constraint Gⱼ, along with its required number of evaluations
             for (poly_idx, (poly, num_evals)) in
-                zip(self.gate.polys.iter(), self.num_evals.iter()).enumerate()
+                zip(self.polys.iter(), self.num_evals.iter()).enumerate()
             {
                 // If the eval_idx X is larger than the required number of evaluations for the current poly,
                 // we don't evaluate it and continue to the next poly.
@@ -246,7 +331,7 @@ impl<F: Field> GateEvaluationCache<F> {
                     &|prod_a, prod_b| prod_a * prod_b,
                     &|scaled, v| scaled * v,
                 );
-                self.gate_eval[poly_idx].evals[eval_idx] = e;
+                self.gate_eval[poly_idx][eval_idx] = e;
             }
         }
         Some(&self.gate_eval)
@@ -254,150 +339,11 @@ impl<F: Field> GateEvaluationCache<F> {
 
     /// Returns a zero-initialized error polynomial for storing all evaluations of
     /// the polynomials for this gate.
-    pub fn empty_error_polynomials(&self) -> Vec<ErrorEvaluations<F>> {
+    pub fn empty_error_polynomials(&self) -> Vec<Vec<F>> {
         self.num_evals
             .iter()
-            .map(|num_eval| ErrorEvaluations::new(*num_eval))
+            .map(|num_eval| vec![F::ZERO; *num_eval])
             .collect()
-    }
-}
-
-/// Given two lists of challenge powers from an existing accumulator and a new circuit execution,
-/// compute the evaluations at X = 0, 1, ..., num_evals-1 of "challenges_acc + X⋅challenges_new".
-/// The returned vector satisfies:
-/// challenge_powers_evals[X][power][j] = (1-X)⋅challenges_acc[power][j] + X⋅challenges_new[j]^power
-/// for
-///    X     = 0, 1, ..., num_evals       - 1
-///    j     = 0, 1, ..., num_challenges  - 1
-///    power = 0, 1, ...,
-fn evaluatuated_challenges<F: Field>(
-    challenges_acc: &[F],
-    challenges_new: &[F],
-    num_evals: usize,
-) -> Vec<Vec<F>> {
-    debug_assert_eq!(
-        challenges_acc.len(),
-        challenges_new.len(),
-        "number of challenges in both accumulators must be the same"
-    );
-
-    let challenges_diff: Vec<_> = zip(challenges_acc.iter(), challenges_new.iter())
-        .map(|(c_acc, c_new)| *c_new - c_acc)
-        .collect();
-
-    let mut challenge_powers_evals = Vec::with_capacity(num_evals);
-
-    // Add the evaluation of the challenge variables at X=0,
-    // corresponding to challenges_acc
-    challenge_powers_evals.push(challenges_acc.to_vec());
-
-    // Iterate over eval = X = 1, ..., num_evals - 1
-    for eval in 1..num_evals {
-        // Get previous evalutions at X-1
-        let prev_evals = &challenge_powers_evals[eval - 1];
-        // compute next row by adding `new` to the previous row
-        let curr_eval = zip(prev_evals.iter(), challenges_diff.iter())
-            .map(|(prev, diff)| *prev + diff)
-            .collect();
-
-        challenge_powers_evals.push(curr_eval);
-    }
-
-    challenge_powers_evals
-}
-
-/// A Protostar `Gate` augments the structure of a `plonk::Gate` to allow for more efficient evaluation.
-/// Stores the different polynomial expressions Gⱼ for the gate.
-/// Each Gⱼ is represented as tree where nodes point to indices of elements of the `queried_*` vectors.
-/// If all original polynomial expressions were multiplied at the top-level by a common simple `Selector`,
-/// this latter leaf is extracted from each Gⱼ and applied only once to all sub-polynomials.
-/// In general, this undoes the transformation done by `Constraints::with_selector`.
-#[derive(Debug, Clone)]
-pub struct Gate<F: Field> {
-    // List of polynomial expressions Gⱼ
-    pub polys: Vec<Expr<F>>,
-    // Simple `Selector` which multiplies all Gⱼ
-    pub simple_selector: Option<Selector>,
-    // Degrees of each Gⱼ
-    pub degrees: Vec<usize>,
-
-    // List of all columns queried by the polynomial expressions Gⱼ
-    pub queried_selectors: Vec<Selector>,
-    pub queried_fixed: Vec<FixedQuery>,
-    pub queried_challenges: Vec<Challenge>,
-    pub queried_instance: Vec<InstanceQuery>,
-    pub queried_advice: Vec<AdviceQuery>,
-}
-
-impl<F: Field> From<&crate::plonk::Gate<F>> for Gate<F> {
-    /// Create an augmented Protostar gate from a `plonk::Gate`.
-    /// - Extract the common top-level `Selector` if it exists
-    /// - Extract all queries, and replace leaves with indices to the queries stored in the gate
-    /// - Flatten challenges so that a product of the same challenge is replaced by a power of that challenge
-    fn from(cs_gate: &crate::plonk::Gate<F>) -> Gate<F> {
-        let mut selectors = BTreeSet::<Selector>::new();
-        let mut fixed = BTreeSet::<FixedQuery>::new();
-        let mut challenges = BTreeSet::<Challenge>::new();
-        let mut instance = BTreeSet::<InstanceQuery>::new();
-        let mut advice = BTreeSet::<AdviceQuery>::new();
-
-        // Recover common simple `Selector` from the `Gate`, along with the branch `Expression`s  it selects
-        let (polys, simple_selector) = cs_gate.extract_simple_selector();
-
-        // Merge products of challenges
-        let polys: Vec<_> = polys
-            .into_iter()
-            .map(|poly| poly.merge_challenge_products())
-            .collect();
-
-        let degrees: Vec<_> = polys.iter().map(|poly| poly.folding_degree()).collect();
-
-        // Collect all common queries for the set of polynomials in `gate`
-        for poly in polys.iter() {
-            poly.traverse(&mut |e| match e {
-                Expression::Selector(v) => {
-                    selectors.insert(*v);
-                }
-                Expression::Fixed(v) => {
-                    fixed.insert(*v);
-                }
-                Expression::Challenge(v) => {
-                    challenges.insert(*v);
-                }
-                Expression::Instance(v) => {
-                    instance.insert(*v);
-                }
-                Expression::Advice(v) => {
-                    advice.insert(*v);
-                }
-                _ => {}
-            });
-        }
-
-        // Convert the sets of queries into sorted vectors
-        let selectors: Vec<_> = selectors.into_iter().collect();
-        let fixed: Vec<_> = fixed.into_iter().collect();
-        let challenges: Vec<_> = challenges.into_iter().collect();
-        let instance: Vec<_> = instance.into_iter().collect();
-        let advice: Vec<_> = advice.into_iter().collect();
-
-        // get homogenized and degree-flattened expressions
-        let polys: Vec<_> = polys
-            .iter()
-            // convert Expression to Expr, replacing each query node by its index in the given vectors
-            .map(|e| e.to_expr(&selectors, &fixed, &challenges, &instance, &advice))
-            .collect();
-
-        Gate {
-            polys,
-            simple_selector,
-            degrees,
-            queried_selectors: selectors,
-            queried_fixed: fixed,
-            queried_challenges: challenges,
-            queried_instance: instance,
-            queried_advice: advice,
-        }
     }
 }
 

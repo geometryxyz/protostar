@@ -23,7 +23,7 @@ use crate::SerdeFormat;
 mod assigned;
 pub(crate) mod circuit;
 mod error;
-pub(crate) mod evaluation;
+pub mod evaluation;
 mod keygen;
 pub(crate) mod lookup;
 pub(crate) mod permutation;
