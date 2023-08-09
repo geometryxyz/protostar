@@ -11,7 +11,7 @@ use crate::{
         commitment::{Blind, CommitmentScheme, Params},
         empty_lagrange, LagrangeCoeff, Polynomial, Rotation,
     },
-    protostar::error_check::gate::GateEvaluationCache,
+    protostar::error_check::gate::{Gate, GateEvaluationCache},
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ff::Field;
@@ -19,7 +19,6 @@ use group::Curve;
 use halo2curves::CurveAffine;
 
 use super::{
-    gate::Gate,
     keygen::ProvingKey,
     transcript::{
         advice::AdviceTranscript, compressed_verifier::CompressedVerifierTranscript,
@@ -100,8 +99,10 @@ impl<C: CurveAffine> Accumulator<C> {
     ) {
         // 1 for beta, 1 for y
         let num_extra_evaluations = 2;
-        let mut gate_caches: Vec<_> = pk
-            .gates()
+
+        let gates: Vec<Gate<_>> = pk.cs().gates().iter().map(Gate::from).collect();
+
+        let mut gate_caches: Vec<_> = gates
             .iter()
             .map(|gate| {
                 GateEvaluationCache::new(

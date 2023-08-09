@@ -18,8 +18,6 @@ use crate::{
     },
 };
 
-use super::gate::Gate;
-
 /// Contains all fixed data for a circuit that is required to create a Protostar `Accumulator`
 #[derive(Debug)]
 pub struct ProvingKey<C: CurveAffine> {
@@ -30,9 +28,6 @@ pub struct ProvingKey<C: CurveAffine> {
 
     // The circuit's unmodified constraint system
     cs: ConstraintSystem<C::Scalar>,
-
-    // Transformed `plonk::Gate`s which have been pre-processed for Protostar
-    gates: Vec<Gate<C::Scalar>>,
 
     // For each column of each type, store the number of real values in each column.
     num_selector_rows: Vec<usize>,
@@ -119,13 +114,10 @@ impl<C: CurveAffine> ProvingKey<C> {
             .permutation
             .build_permutations(num_rows, &cs.permutation);
 
-        let gates: Vec<Gate<_>> = cs.gates().iter().map(Gate::from).collect();
-
         Ok(ProvingKey {
             num_rows,
             usable_rows: assembly.usable_rows,
             cs,
-            gates,
             fixed,
             selectors: assembly.selectors,
             permutations,
@@ -138,10 +130,10 @@ impl<C: CurveAffine> ProvingKey<C> {
 
     /// Maximum degree over all gates in the circuit
     pub fn max_degree(&self) -> usize {
-        *self
-            .gates
+        self.cs()
+            .gates()
             .iter()
-            .map(|g| g.degrees.iter().max().unwrap())
+            .flat_map(|gate| gate.polynomials().iter().map(|poly| poly.folding_degree()))
             .max()
             .unwrap()
     }
@@ -230,16 +222,12 @@ impl<C: CurveAffine> ProvingKey<C> {
         max_challenge_power
     }
 
-    /// Returns a list of all `Gate`s in the circuit
-    pub fn gates(&self) -> &[Gate<C::Scalar>] {
-        &self.gates
-    }
-
     /// Total number of linearly-independent constraints
     pub fn num_constraints(&self) -> usize {
-        self.gates
+        self.cs()
+            .gates()
             .iter()
-            .fold(0, |acc, gate| acc + gate.polys.len())
+            .fold(0, |acc, gate| acc + gate.polynomials().len())
     }
 }
 
