@@ -8,7 +8,7 @@ use crate::{
     arithmetic::log2_ceil,
     circuit::{layouter::SyncDeps, Value},
     plonk::{
-        circuit::FloorPlanner, permutation, Advice, AdviceQuery, Any, Assigned, Assignment,
+        circuit::FloorPlanner, lookup, permutation, Advice, AdviceQuery, Any, Assigned, Assignment,
         Challenge, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, FixedQuery,
         Instance, InstanceQuery, Selector,
     },
@@ -17,6 +17,8 @@ use crate::{
         EvaluationDomain, LagrangeCoeff, Polynomial,
     },
 };
+
+use super::error_check;
 
 /// Contains all fixed data for a circuit that is required to create a Protostar `Accumulator`
 #[derive(Debug)]
@@ -222,12 +224,29 @@ impl<C: CurveAffine> ProvingKey<C> {
         max_challenge_power
     }
 
-    /// Total number of linearly-independent constraints
-    pub fn num_constraints(&self) -> usize {
-        self.cs()
+    /// Returns the polynomials we fold over. In particular we apply the challenge merging
+    /// and skip polynomials with degree ≤ 1.
+    pub fn folding_constraints(&self) -> Vec<Expression<C::Scalar>> {
+        self.cs
             .gates()
             .iter()
-            .fold(0, |acc, gate| acc + gate.polynomials().len())
+            .flat_map(|gate| {
+                gate.polynomials()
+                    .iter()
+                    .filter(|poly| poly.folding_degree() > error_check::MIN_GATE_DEGREE)
+                    .map(|poly| poly.clone().merge_challenge_products())
+            })
+            .collect()
+    }
+
+    /// Total number of linearly-independent constraints, whose degrees are larger than 1
+    pub fn num_folding_constraints(&self) -> usize {
+        self.cs
+            .gates()
+            .iter()
+            .flat_map(|gate| gate.polynomials().iter().map(|poly| poly.folding_degree()))
+            .filter(|d| *d > error_check::MIN_GATE_DEGREE)
+            .count()
     }
 }
 

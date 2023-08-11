@@ -4,6 +4,7 @@ use std::{
     iter::zip,
     ops::{Add, Deref, DerefMut, Index, IndexMut, RangeFrom, RangeFull, Sub},
 };
+mod evaluations;
 mod gate;
 use crate::{
     arithmetic::{field_integers, parallelize, powers},
@@ -27,17 +28,33 @@ use super::{
     },
 };
 
+/// A constraint whose degree is 1 has a trivial (i.e. zero) error polynomial.
+/// During the evaluation, we skip these constraints since they would
+/// otherwise need to be evaluated NUM_EXTRA_EVALUATIONS many times.
+pub(super) const MIN_GATE_DEGREE: usize = 1;
+/// Each constraint error polynomial must be multiplied by the challenges
+/// beta and y, so we need to evaluate it in 2 additional points.
+const NUM_EXTRA_EVALUATIONS: usize = 2;
+/// The evaluations of the error polynomials at 0 and 1 correspond to the
+/// evaluation of the constraints in the accumulator and the new witness.
+/// We cache these in `Accumulator` and start evaluating at X=2
+const NUM_SKIPPED_EVALUATIONS: usize = 2;
+
 /// An `Accumulator` contains the entirety of the IOP transcript,
 /// including commitments and verifier challenges.
 #[derive(Debug)]
 pub struct Accumulator<C: CurveAffine> {
     instance_transcript: InstanceTranscript<C>,
     advice_transcript: AdviceTranscript<C>,
-    compressed_verifier_transcript: CompressedVerifierTranscript<C>,
     lookup_transcript: Option<LookupTranscipt<C>>,
+    compressed_verifier_transcript: CompressedVerifierTranscript<C>,
 
     // Powers of a challenge y for taking a random linear-combination of all constraints.
     ys: Vec<C::Scalar>,
+
+    // For each constraint of degree > 1, we cache its error polynomial evaluation here
+    // so we can interpolate all of them individually.
+    constraint_errors: Vec<C::Scalar>,
 
     // Error value for all constraints
     error: C::Scalar,
@@ -53,14 +70,23 @@ impl<C: CurveAffine> Accumulator<C> {
         compressed_verifier_transcript: CompressedVerifierTranscript<C>,
         y: C::Scalar,
     ) -> Self {
-        let ys: Vec<_> = powers(y).skip(1).take(pk.num_constraints()).collect();
+        let num_constraints = pk.num_folding_constraints();
+
+        // If the initial transcript is correct, then the constraint polynomials should all
+        // evaluate to 0.
+        let constraint_errors = vec![C::Scalar::ZERO; num_constraints];
+
+        // Compute powers of the challenge y to do a random-linear combination of the
+        // constraint error polynomials.
+        let ys: Vec<_> = powers(y).skip(1).take(num_constraints).collect();
 
         Self {
             instance_transcript,
             advice_transcript,
-            compressed_verifier_transcript,
             lookup_transcript,
+            compressed_verifier_transcript,
             ys,
+            constraint_errors,
             error: C::Scalar::ZERO,
         }
     }
@@ -72,9 +98,7 @@ impl<C: CurveAffine> Accumulator<C> {
         new: Accumulator<C>,
         transcript: &mut T,
     ) {
-        // 1 for beta, 1 for y
-        let num_extra_evaluations = 2;
-
+        let num_rows_i = pk.num_rows() as i32;
         let mut gate_caches: Vec<_> = pk
             .cs()
             .gates()
@@ -84,13 +108,13 @@ impl<C: CurveAffine> Accumulator<C> {
                     gate,
                     &self.advice_transcript.challenges,
                     &new.advice_transcript.challenges,
-                    num_extra_evaluations,
+                    num_rows_i,
                 )
             })
             .collect();
 
-        let num_rows_i = pk.num_rows() as i32;
-        let num_evals = pk.max_degree() + 1 + num_extra_evaluations;
+        // Total number of evaluations of the final error polynomial, ignoring the evaluations at 0, 1.
+        let max_num_evals = pk.max_degree() + 1 + NUM_EXTRA_EVALUATIONS - NUM_SKIPPED_EVALUATIONS;
 
         // Store the sum of the
         // eval_sums[gate_idx][constraint_idx][eval_idx]
@@ -103,12 +127,12 @@ impl<C: CurveAffine> Accumulator<C> {
             // Get the next evaluation of ((1-X) * acc.b + X * acc.b)
             let beta_acc = self.compressed_verifier_transcript.beta_poly()[row_idx];
             let beta_new = new.compressed_verifier_transcript.beta_poly()[row_idx];
-            let beta_evals: Vec<_> = boolean_evaluations(beta_acc, beta_new)
-                .take(num_evals)
+            let beta_evals: Vec<_> = boolean_evaluations_skip_2(beta_acc, beta_new)
+                .take(max_num_evals)
                 .collect();
 
             for (gate_idx, gate_cache) in gate_caches.iter_mut().enumerate() {
-                let evals = gate_cache.evaluate(row_idx, num_rows_i, &pk, self, &new);
+                let evals = gate_cache.evaluate(row_idx, &pk, self, &new);
                 if let Some(evals) = evals {
                     // For each constraint in the current gate, scale it by the beta vector
                     // and add it to the corresponding error polynomial accumulator `error_polys`
@@ -138,18 +162,30 @@ impl<C: CurveAffine> Accumulator<C> {
             .iter_mut()
             .zip(zip(self.ys.iter(), new.ys.iter()))
             .for_each(|(evals, (y_acc, y_new))| {
-                let y_evals_iter = boolean_evaluations(*y_acc, *y_new);
+                let y_evals_iter = boolean_evaluations_skip_2(*y_acc, *y_new);
                 for (error_eval, y_eval) in zip(evals.iter_mut(), y_evals_iter) {
                     *error_eval *= y_eval;
                 }
+            });
+
+        // re-insert the evaluations at 0,1 from the cache for each constraint
+        final_evals
+            .iter_mut()
+            .zip(zip(
+                self.constraint_errors.iter(),
+                new.constraint_errors.iter(),
+            ))
+            .for_each(|(final_evals, (acc_eval, new_eval))| {
+                final_evals.insert(0, *new_eval);
+                final_evals.insert(0, *acc_eval);
             });
 
         // convert evaluations into coefficients
         let final_polys = batch_lagrange_interpolate_integers(&final_evals);
 
         // add all polynomials together
-        let final_poly = final_polys.into_iter().fold(
-            vec![C::Scalar::ZERO; num_evals],
+        let mut final_poly = final_polys.iter().fold(
+            vec![C::Scalar::ZERO; max_num_evals],
             |mut final_poly, coeffs| {
                 final_poly
                     .iter_mut()
@@ -169,13 +205,50 @@ impl<C: CurveAffine> Accumulator<C> {
         let expected_error_new: C::Scalar = final_poly.iter().sum();
         assert_eq!(expected_error_new, new.error);
 
-        // Commit to error poly
-        for coef in final_poly.iter() {
+        // Subtract (1-X)⋅acc.error + X⋅new.error
+        final_poly[0] -= self.error;
+        final_poly[1] -= new.error - self.error;
+
+        // Compute and commit to quotient
+        //
+        //          e(X) - (1-X)⋅e(0) - X⋅e(1)
+        // e'(X) = ----------------------------
+        //                    (X-1)X
+        //
+        // Since the verifier already knows e(0), e(1),
+        // we can send this polynomial instead and save 2 hashes.
+        // The verifier evaluates e(X) as
+        //   e(X) = (1-X)X⋅e'(X) + (1-X)⋅e(0) + X⋅e(1)
+        let quotient_poly = quotient_by_boolean_vanishing(&final_poly);
+        for coef in quotient_poly.iter() {
             let _ = transcript.write_scalar(*coef);
         }
 
         // Get alpha challenge
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+
+        // Evaluate all cached constraint errors
+        for (error, final_poly) in self.constraint_errors.iter_mut().zip(final_polys.iter()) {
+            let mut eval = C::Scalar::ZERO;
+            for coeff in final_poly.iter().rev() {
+                eval *= alpha;
+                eval += coeff;
+            }
+            *error = eval;
+        }
+
+        // Evaluation of e(X) = (1-X)X⋅e'(X) + (1-X)⋅e(0) + X⋅e(1) in alpha
+        self.error = {
+            let mut error = C::Scalar::ZERO;
+            for coeff in quotient_poly.iter().rev() {
+                error *= alpha;
+                error += coeff;
+            }
+            error *= alpha.square() - alpha;
+            error += (C::Scalar::ONE - alpha) * self.error;
+            error += alpha * new.error;
+            error
+        };
 
         // fold challenges
         for (c_acc, c_new) in zip(self.challenges_iter_mut(), new.challenges_iter()) {
@@ -204,13 +277,6 @@ impl<C: CurveAffine> Accumulator<C> {
         for (blind_acc, blind_new) in zip(self.blinds_iter_mut(), new.blinds_iter()) {
             *blind_acc += (*blind_new - *blind_acc) * alpha
         }
-
-        // horner eval of the polynomial e(X) in alpha
-        self.error = C::Scalar::ZERO;
-        for coeff in final_poly.iter().rev() {
-            self.error *= alpha;
-            self.error += coeff;
-        }
     }
 
     /// Checks whether this accumulator is valid by recomputing all commitments and the error.
@@ -236,16 +302,7 @@ impl<C: CurveAffine> Accumulator<C> {
         parallelize(&mut errors, |errors, start| {
             let num_rows_i = pk.num_rows() as i32;
 
-            let polys: Vec<_> = pk
-                .cs()
-                .gates()
-                .iter()
-                .flat_map(|gate| {
-                    gate.polynomials()
-                        .iter()
-                        .map(|poly| poly.clone().merge_challenge_products())
-                })
-                .collect();
+            let polys: Vec<_> = pk.folding_constraints();
             let ys = self.ys.clone();
 
             let mut es: Vec<_> = vec![C::Scalar::ZERO; polys.len()];
@@ -406,19 +463,63 @@ fn boolean_evaluations<F: Field>(eval0: F, eval1: F) -> impl Iterator<Item = F> 
     std::iter::successors(Some(eval0), move |acc| Some(linear + acc))
 }
 
+/// Same as `boolean_evaluations` but starting at j = 2.
+fn boolean_evaluations_skip_2<F: Field>(eval0: F, eval1: F) -> impl Iterator<Item = F> {
+    let linear = eval1 - eval0;
+    // p(2) = (1-2)⋅eval0 + 2⋅eval1 = eval1 + (eval1 - eval0) = eval1 + linear
+    std::iter::successors(Some(eval1 + linear), move |acc| Some(linear + acc))
+}
+
 /// For a sequence of linear polynomial p_k(X) such that p_k(0) = evals0[k], p_k(1) = evals1[k],
 /// return an iterator yielding a vector of evaluations [p_0(j), p_1(j), ...] for j = 0, 1, ... .
-fn boolean_evaluations_vec<F: Field>(evals0: &[F], evals1: &[F]) -> impl Iterator<Item = Vec<F>> {
-    assert_eq!(evals0.len(), evals1.len());
-    let diff: Vec<_> = zip(evals0.iter(), evals1.iter())
-        .map(|(eval0, eval1)| *eval1 - eval0)
-        .collect();
-    std::iter::successors(Some(evals0.to_vec()), move |acc| {
-        Some(
-            zip(acc.iter(), diff.iter())
-                .map(|(acc, diff)| *acc + diff)
-                .collect(),
-        )
+fn boolean_evaluations_vec<F: Field>(
+    evals0: Vec<F>,
+    evals1: Vec<F>,
+) -> impl Iterator<Item = Vec<F>> {
+    debug_assert_eq!(evals0.len(), evals1.len());
+
+    let mut diff = evals1;
+    diff.iter_mut()
+        .zip(evals0.iter())
+        .for_each(|(eval1, eval0)| *eval1 -= eval0);
+
+    let init = evals0;
+    std::iter::successors(Some(init), move |acc| {
+        let mut next = acc.clone();
+        next.iter_mut()
+            .zip(diff.iter())
+            .for_each(|(next, diff)| *next += diff);
+        Some(next)
+    })
+}
+
+/// Same as boolean_evaluations_vec but starting at j=2.
+fn boolean_evaluations_vec_skip_2<F: Field>(
+    evals0: Vec<F>,
+    evals1: Vec<F>,
+) -> impl Iterator<Item = Vec<F>> {
+    debug_assert_eq!(evals0.len(), evals1.len());
+
+    // diff = evals1 - evals0
+    let mut diff = evals0;
+    diff.iter_mut()
+        .zip(evals1.iter())
+        .for_each(|(eval0, eval1)| {
+            let diff = *eval1 - *eval0;
+            *eval0 = diff;
+        });
+
+    // init = evals1 + diff
+    let mut init = evals1;
+    init.iter_mut()
+        .zip(diff.iter())
+        .for_each(|(eval1, diff)| *eval1 += diff);
+    std::iter::successors(Some(init), move |acc| {
+        let mut next = acc.clone();
+        next.iter_mut()
+            .zip(diff.iter())
+            .for_each(|(next, diff)| *next += diff);
+        Some(next)
     })
 }
 
@@ -485,4 +586,28 @@ pub fn batch_lagrange_interpolate_integers<F: Field>(evals: &[Vec<F>]) -> Vec<Ve
     }
 
     final_polys
+}
+
+// Given a polynomial p(X) of degree d > 1, compute its quotient q(X)
+// such that p(X) = (1-X)X⋅q(X).
+// Panics if deg(p) ≤ 1 or if p(0) ≠ 0 or p(1) ≠ 0
+fn quotient_by_boolean_vanishing<F: Field>(poly: &[F]) -> Vec<F> {
+    let n = poly.len();
+    assert!(n >= 2, "deg(poly) < 2");
+    assert!(poly[0].is_zero_vartime(), "poly(0) != 0");
+
+    let mut tmp = F::ZERO;
+
+    let quotient = poly
+        .iter()
+        .skip(1)
+        .map(|a_i| {
+            tmp -= a_i;
+            tmp
+        })
+        .take(n - 2)
+        .collect();
+    // p(1) = ∑p_i = 0
+    assert!(tmp.is_zero_vartime(), "poly(1) != 0");
+    quotient
 }

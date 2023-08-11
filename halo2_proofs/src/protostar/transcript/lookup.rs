@@ -1,5 +1,5 @@
 use core::num;
-use ff::{BatchInvert, Field};
+use ff::{BatchInvert, Field, PrimeField};
 use group::Curve;
 use halo2curves::CurveAffine;
 use rand_core::RngCore;
@@ -60,6 +60,14 @@ pub(crate) fn create_lookup_transcript<
     if num_lookups == 0 {
         return None;
     }
+
+    // TODO(@adr1anh): Fix soundness bug:
+    // The challenge theta must be sampled after having committed to the m's
+    // It should be sampled at the same time as r.
+    // This is very annoying since we use theta to compress the table columns and efficiently lookup indices.
+    // Proposed solution:
+    // During preprocessing, we create a HashMap<Vec<C::Scalar>, usize> for each lookup argument,
+    // and use it to lookup the indices.
 
     let theta = *transcript.squeeze_challenge_scalar::<C::Scalar>();
 

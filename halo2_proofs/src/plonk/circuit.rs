@@ -1673,50 +1673,6 @@ impl<F: Field> Gate<F> {
     pub(crate) fn queried_cells(&self) -> &[VirtualCell] {
         &self.queried_cells
     }
-
-    /// Undo `Constraints::WithSelector` and return the common top-level `Selector` along with the expressions it selects.
-    /// If no simple `Selector` is found, returns the original list of polynomials.
-    pub fn extract_simple_selector(&self) -> (Vec<Expression<F>>, Option<Selector>) {
-        let (mut polys, simple_selectors): (Vec<_>, Vec<_>) = self
-            .polys
-            .iter()
-            .map(|poly| {
-                // Check whether the top node is a multiplication by a selector
-                let (simple_selector, poly) = match poly {
-                    // If the whole polynomial is multiplied by a simple selector,
-                    // return it along with the expression it selects
-                    Expression::Product(e1, e2) => match (&**e1, &**e2) {
-                        (Expression::Selector(s), e) | (e, Expression::Selector(s)) => {
-                            (Some(*s), e)
-                        }
-                        _ => (None, poly),
-                    },
-                    _ => (None, poly),
-                };
-                (poly.clone(), simple_selector)
-            })
-            .unzip();
-
-        // Check if all simple selectors are the same and if so select it
-        let potential_selector = match simple_selectors.as_slice() {
-            [head, tail @ ..] => {
-                if let Some(s) = *head {
-                    tail.iter().all(|x| x.is_some_and(|x| s == x)).then(|| s)
-                } else {
-                    None
-                }
-            }
-            [] => None,
-        };
-
-        // if we haven't found a common simple selector, then we just use the previous polys
-        if potential_selector.is_none() {
-            polys.clear();
-            polys.extend_from_slice(&self.polys);
-        }
-
-        (polys, potential_selector)
-    }
 }
 
 /// This is a description of the circuit environment, such as the gate, column and
