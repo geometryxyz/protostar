@@ -6,6 +6,8 @@ use std::{
 };
 
 mod gate;
+mod row;
+
 use crate::{
     arithmetic::{field_integers, parallelize, powers},
     poly::{
