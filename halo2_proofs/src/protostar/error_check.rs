@@ -30,10 +30,6 @@ use super::{
     },
 };
 
-/// A constraint whose degree is 1 has a trivial (i.e. zero) error polynomial.
-/// During the evaluation, we skip these constraints since they would
-/// otherwise need to be evaluated NUM_EXTRA_EVALUATIONS many times.
-pub(super) const MIN_GATE_DEGREE: usize = 1;
 /// Each constraint error polynomial must be multiplied by the challenges
 /// beta and y, so we need to evaluate it in 2 additional points.
 const NUM_EXTRA_EVALUATIONS: usize = 2;
@@ -44,7 +40,7 @@ const NUM_SKIPPED_EVALUATIONS: usize = 2;
 
 /// An `Accumulator` contains the entirety of the IOP transcript,
 /// including commitments and verifier challenges.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Accumulator<C: CurveAffine> {
     instance_transcript: InstanceTranscript<C>,
     advice_transcript: AdviceTranscript<C>,

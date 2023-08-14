@@ -351,6 +351,13 @@ fn main() {
     .unwrap();
     assert!(acc.decide(&params, &pk));
 
+    // Folding an accumulator with itself should yield the same one,
+    // since (1-X)*acc + X*acc = acc
+    let acc1 = acc.clone();
+    acc.fold(&pk, acc1.clone(), &mut transcript);
+    assert!(acc.decide(&params, &pk));
+    assert_eq!(acc, acc1);
+
     let acc2 = protostar::prover::create_accumulator(
         &params,
         &pk,

@@ -20,7 +20,7 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LookupTranscipt<C: CurveAffine> {
     pub challanges_theta: Vec<C::Scalar>,
 

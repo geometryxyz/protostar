@@ -27,7 +27,7 @@ use std::{
 
 /// Advice polynomials sent by the prover during the first phases of
 /// the IOP protocol.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AdviceTranscript<C: CurveAffine> {
     // Array of challenges and their powers
     // challenges[i][d] = challenge_i^{d+1}
