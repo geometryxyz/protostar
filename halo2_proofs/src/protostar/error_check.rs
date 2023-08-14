@@ -4,7 +4,7 @@ use std::{
     iter::zip,
     ops::{Add, Deref, DerefMut, Index, IndexMut, RangeFrom, RangeFull, Sub},
 };
-mod evaluations;
+
 mod gate;
 use crate::{
     arithmetic::{field_integers, parallelize, powers},
@@ -100,12 +100,11 @@ impl<C: CurveAffine> Accumulator<C> {
     ) {
         let num_rows_i = pk.num_rows() as i32;
         let mut gate_caches: Vec<_> = pk
-            .cs()
-            .gates()
+            .folding_constraints()
             .iter()
-            .map(|gate| {
+            .map(|polys| {
                 GateEvaluator::new(
-                    gate,
+                    polys,
                     &self.advice_transcript.challenges,
                     &new.advice_transcript.challenges,
                     num_rows_i,
@@ -132,20 +131,35 @@ impl<C: CurveAffine> Accumulator<C> {
                 .collect();
 
             for (gate_idx, gate_cache) in gate_caches.iter_mut().enumerate() {
-                let evals = gate_cache.evaluate(row_idx, &pk, self, &new);
-                if let Some(evals) = evals {
-                    // For each constraint in the current gate, scale it by the beta vector
-                    // and add it to the corresponding error polynomial accumulator `error_polys`
-                    for (acc_error_poly, new_error_poly) in
-                        zip(error_polys[gate_idx].iter_mut(), evals.iter())
+                // Return early if the selector is off.
+                if let Some(selector) = pk.simple_selectors()[gate_idx] {
+                    if !pk.selectors[selector.index()][row_idx] {
+                        continue;
+                    }
+                }
+                // Compute evaluations of the gate constraints at X = 2, 3, ... ,
+                // multiply them by the evaluations of beta,
+                // and add them to error_polys_evals.
+                let evals = gate_cache.evaluate_and_accumulate_errors(
+                    row_idx,
+                    &pk.selectors,
+                    &pk.fixed,
+                    &self.instance_transcript.instance_polys,
+                    &new.instance_transcript.instance_polys,
+                    &self.advice_transcript.advice_polys,
+                    &new.advice_transcript.advice_polys,
+                );
+                // For each constraint in the current gate, scale it by the beta vector
+                // and add it to the corresponding error polynomial accumulator `error_polys`
+                for (acc_error_poly, new_error_poly) in
+                    zip(error_polys[gate_idx].iter_mut(), evals.iter())
+                {
+                    // Multiply each poly by beta and add it to the corresponding accumulator
+                    for (acc_error_eval, (new_error_eval, beta_eval)) in acc_error_poly
+                        .iter_mut()
+                        .zip(zip(new_error_poly.iter(), beta_evals.iter()))
                     {
-                        // Multiply each poly by beta and add it to the corresponding accumulator
-                        for (acc_error_eval, (new_error_eval, beta_eval)) in acc_error_poly
-                            .iter_mut()
-                            .zip(zip(new_error_poly.iter(), beta_evals.iter()))
-                        {
-                            *acc_error_eval += *new_error_eval * beta_eval;
-                        }
+                        *acc_error_eval += *new_error_eval * beta_eval;
                     }
                 }
             }
@@ -185,8 +199,9 @@ impl<C: CurveAffine> Accumulator<C> {
 
         // add all polynomials together
         let mut final_poly = final_polys.iter().fold(
-            vec![C::Scalar::ZERO; max_num_evals],
+            vec![C::Scalar::ZERO; max_num_evals + NUM_SKIPPED_EVALUATIONS],
             |mut final_poly, coeffs| {
+                assert!(coeffs.len() <= final_poly.len());
                 final_poly
                     .iter_mut()
                     .zip(coeffs.iter())
@@ -302,7 +317,21 @@ impl<C: CurveAffine> Accumulator<C> {
         parallelize(&mut errors, |errors, start| {
             let num_rows_i = pk.num_rows() as i32;
 
-            let polys: Vec<_> = pk.folding_constraints();
+            // re-multiply by selectors
+            let polys: Vec<_> = pk
+                .folding_constraints()
+                .iter()
+                .zip(pk.simple_selectors().iter())
+                .flat_map(|(polys, selector)| {
+                    polys.iter().map(move |poly| {
+                        if let Some(s) = selector {
+                            poly.clone() * s.expr()
+                        } else {
+                            poly.clone()
+                        }
+                    })
+                })
+                .collect();
             let ys = self.ys.clone();
 
             let mut es: Vec<_> = vec![C::Scalar::ZERO; polys.len()];
@@ -598,7 +627,7 @@ fn quotient_by_boolean_vanishing<F: Field>(poly: &[F]) -> Vec<F> {
 
     let mut tmp = F::ZERO;
 
-    let quotient = poly
+    let quotient: Vec<_> = poly
         .iter()
         .skip(1)
         .map(|a_i| {
@@ -608,6 +637,10 @@ fn quotient_by_boolean_vanishing<F: Field>(poly: &[F]) -> Vec<F> {
         .take(n - 2)
         .collect();
     // p(1) = ∑p_i = 0
-    assert!(tmp.is_zero_vartime(), "poly(1) != 0");
+    assert_eq!(
+        quotient.last().unwrap(),
+        poly.last().unwrap(),
+        "poly(1) != 0"
+    );
     quotient
 }

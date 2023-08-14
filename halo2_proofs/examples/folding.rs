@@ -349,6 +349,7 @@ fn main() {
         &mut transcript,
     )
     .unwrap();
+    assert!(acc.decide(&params, &pk));
 
     let acc2 = protostar::prover::create_accumulator(
         &params,
@@ -360,6 +361,7 @@ fn main() {
     )
     .unwrap();
     acc.fold(&pk, acc2, &mut transcript);
+    assert!(acc.decide(&params, &pk));
 
     let acc3 = protostar::prover::create_accumulator(
         &params,

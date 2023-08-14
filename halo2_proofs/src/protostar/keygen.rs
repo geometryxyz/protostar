@@ -31,6 +31,10 @@ pub struct ProvingKey<C: CurveAffine> {
     // The circuit's unmodified constraint system
     cs: ConstraintSystem<C::Scalar>,
 
+    folding_constraints: Vec<Vec<Expression<C::Scalar>>>,
+    simple_selectors: Vec<Option<Selector>>,
+    linear_constraints: Vec<Expression<C::Scalar>>,
+
     // For each column of each type, store the number of real values in each column.
     num_selector_rows: Vec<usize>,
     num_fixed_rows: Vec<usize>,
@@ -116,10 +120,41 @@ impl<C: CurveAffine> ProvingKey<C> {
             .permutation
             .build_permutations(num_rows, &cs.permutation);
 
+        let mut linear_constraints = Vec::new();
+
+        let folding_constraints: Vec<_> = cs
+            .gates()
+            .iter()
+            .map(|gate| {
+                gate.polynomials()
+                    .iter()
+                    .filter_map(|poly| {
+                        let poly = poly.clone().merge_challenge_products();
+                        let degree = poly.folding_degree();
+                        if degree <= 1 {
+                            linear_constraints.push(poly);
+                            None
+                        } else {
+                            Some(poly)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|poly_vec| !poly_vec.is_empty())
+            .collect();
+
+        let (folding_constraints, simple_selectors): (Vec<_>, Vec<_>) = folding_constraints
+            .iter()
+            .map(|polys| extract_common_simple_selector(&polys))
+            .unzip();
+
         Ok(ProvingKey {
             num_rows,
             usable_rows: assembly.usable_rows,
             cs,
+            folding_constraints,
+            simple_selectors,
+            linear_constraints,
             fixed,
             selectors: assembly.selectors,
             permutations,
@@ -132,10 +167,11 @@ impl<C: CurveAffine> ProvingKey<C> {
 
     /// Maximum degree over all gates in the circuit
     pub fn max_degree(&self) -> usize {
-        self.cs()
-            .gates()
+        self.folding_constraints
             .iter()
-            .flat_map(|gate| gate.polynomials().iter().map(|poly| poly.folding_degree()))
+            .flat_map(|polys| polys.iter())
+            .chain(self.linear_constraints.iter())
+            .map(|poly| poly.folding_degree())
             .max()
             .unwrap()
     }
@@ -207,13 +243,13 @@ impl<C: CurveAffine> ProvingKey<C> {
     /// is equal to the highest power `d` that a challenge appears over all `Gate`s
     pub fn max_challenge_powers(&self) -> Vec<usize> {
         let num_challenges = self.num_challenges();
-        let mut max_challenge_power = vec![0; num_challenges];
+        let mut max_challenge_power = vec![1; num_challenges];
 
         for poly in self
-            .cs()
-            .gates()
+            .folding_constraints
             .iter()
-            .flat_map(|gate| gate.polynomials().iter())
+            .flat_map(|poly| poly.iter())
+            .chain(self.linear_constraints.iter())
         {
             for (idx, max_power) in max_challenge_power.iter_mut().enumerate() {
                 let new_power = poly.max_challenge_power(idx);
@@ -224,29 +260,28 @@ impl<C: CurveAffine> ProvingKey<C> {
         max_challenge_power
     }
 
+    // Returns all linear constraints which do not participate in folding
+    pub fn linear_constraints(&self) -> &[Expression<C::Scalar>] {
+        &self.linear_constraints
+    }
+
     /// Returns the polynomials we fold over. In particular we apply the challenge merging
     /// and skip polynomials with degree ≤ 1.
-    pub fn folding_constraints(&self) -> Vec<Expression<C::Scalar>> {
-        self.cs
-            .gates()
-            .iter()
-            .flat_map(|gate| {
-                gate.polynomials()
-                    .iter()
-                    .filter(|poly| poly.folding_degree() > error_check::MIN_GATE_DEGREE)
-                    .map(|poly| poly.clone().merge_challenge_products())
-            })
-            .collect()
+    pub fn folding_constraints(&self) -> &[Vec<Expression<C::Scalar>>] {
+        &self.folding_constraints
     }
 
     /// Total number of linearly-independent constraints, whose degrees are larger than 1
     pub fn num_folding_constraints(&self) -> usize {
-        self.cs
-            .gates()
+        self.folding_constraints
             .iter()
-            .flat_map(|gate| gate.polynomials().iter().map(|poly| poly.folding_degree()))
-            .filter(|d| *d > error_check::MIN_GATE_DEGREE)
-            .count()
+            .map(|polys| polys.len())
+            .sum()
+    }
+
+    /// Total number of linearly-independent constraints, whose degrees are larger than 1
+    pub fn simple_selectors(&self) -> &[Option<Selector>] {
+        &self.simple_selectors
     }
 }
 
@@ -503,3 +538,45 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 //         })
 //     }
 // }
+
+/// Undo `Constraints::with_selector` and return the common top-level `Selector` along with the `Expression` it selects.
+/// If no simple `Selector` is found, returns the original list of polynomials.
+fn extract_common_simple_selector<F: Field>(
+    polys: &[Expression<F>],
+) -> (Vec<Expression<F>>, Option<Selector>) {
+    let (extracted_polys, simple_selectors): (Vec<_>, Vec<_>) = polys
+        .iter()
+        .map(|poly| {
+            // Check whether the top node is a multiplication by a selector
+            let (simple_selector, poly) = match poly {
+                // If the whole polynomial is multiplied by a simple selector,
+                // return it along with the expression it selects
+                Expression::Product(e1, e2) => match (&**e1, &**e2) {
+                    (Expression::Selector(s), e) | (e, Expression::Selector(s)) => (Some(*s), e),
+                    _ => (None, poly),
+                },
+                _ => (None, poly),
+            };
+            (poly.clone(), simple_selector)
+        })
+        .unzip();
+
+    // Check if all simple selectors are the same and if so select it
+    let potential_selector = match simple_selectors.as_slice() {
+        [head, tail @ ..] => {
+            if let Some(s) = *head {
+                tail.iter().all(|x| x.is_some_and(|x| s == x)).then(|| s)
+            } else {
+                None
+            }
+        }
+        [] => None,
+    };
+
+    // if we haven't found a common simple selector, then we just use the previous polys
+    if potential_selector.is_none() {
+        (polys.to_vec(), None)
+    } else {
+        (extracted_polys, potential_selector)
+    }
+}
