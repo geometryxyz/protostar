@@ -303,74 +303,86 @@ impl<C: CurveAffine> Accumulator<C> {
             C::CurveExt::batch_normalize(&commitments_projective, &mut commitments);
             zip(commitments, self.commitments_iter()).all(|(actual, expected)| actual == *expected)
         };
-
-        /// Return the index in the polynomial of size `isize` after rotation `rot`.
-        fn get_rotation_idx(idx: usize, rot: Rotation, isize: i32) -> usize {
-            (((idx as i32) + rot.0).rem_euclid(isize)) as usize
-        }
-
         // evaluate the error at each row
         let mut errors = vec![C::Scalar::ZERO; pk.num_usable_rows()];
 
         parallelize(&mut errors, |errors, start| {
             let num_rows_i = pk.num_rows() as i32;
-
-            // re-multiply by selectors
-            let polys: Vec<_> = pk
-                .folding_constraints()
-                .iter()
-                .zip(pk.simple_selectors().iter())
-                .flat_map(|(polys, selector)| {
-                    polys.iter().map(move |poly| {
-                        if let Some(s) = selector {
-                            poly.clone() * s.expr()
-                        } else {
-                            poly.clone()
-                        }
-                    })
-                })
-                .collect();
             let ys = self.ys.clone();
 
-            let mut es: Vec<_> = vec![C::Scalar::ZERO; polys.len()];
+            let (mut folding_errors, mut folding_gate_evs): (Vec<_>, Vec<_>) = pk
+                .folding_constraints()
+                .iter()
+                .map(|polys| {
+                    (
+                        vec![C::Scalar::ZERO; polys.len()],
+                        GateEvaluator::new_single(
+                            &polys,
+                            &self.advice_transcript.challenges,
+                            num_rows_i,
+                        ),
+                    )
+                })
+                .unzip();
+
+            let mut linear_gate_ev = GateEvaluator::new_single(
+                pk.linear_constraints(),
+                &self.advice_transcript.challenges,
+                num_rows_i,
+            );
+            let mut linear_errors = vec![C::Scalar::ZERO; pk.linear_constraints().len()];
+
+            let linear_challenge = self
+                .compressed_verifier_transcript
+                .beta()
+                .pow_vartime([pk.num_usable_rows() as u64]);
+            let linear_challenges: Vec<_> = powers(linear_challenge)
+                .skip(1)
+                .take(linear_errors.len())
+                .collect();
+
             for (i, error) in errors.iter_mut().enumerate() {
                 let row = start + i;
 
-                for (e, poly) in zip(es.iter_mut(), polys.iter()) {
-                    *e = poly.evaluate(
-                        &|constant| constant,
-                        &|selector| {
-                            if pk.selectors[selector.0][row] {
-                                C::Scalar::ONE
-                            } else {
-                                C::Scalar::ZERO
-                            }
-                        },
-                        &|query| {
-                            pk.fixed[query.column_index()]
-                                [get_rotation_idx(row, query.rotation(), num_rows_i)]
-                        },
-                        &|query| {
-                            self.advice_transcript.advice_polys[query.column_index()]
-                                [get_rotation_idx(row, query.rotation(), num_rows_i)]
-                        },
-                        &|query| {
-                            self.instance_transcript.instance_polys[query.column_index()]
-                                [get_rotation_idx(row, query.rotation(), num_rows_i)]
-                        },
-                        &|challenge| {
-                            self.advice_transcript.challenges[challenge.index()]
-                                [challenge.power() - 1]
-                        },
-                        &|negated| -negated,
-                        &|sum_a, sum_b| sum_a + sum_b,
-                        &|prod_a, prod_b| prod_a * prod_b,
-                        &|scaled, v| scaled * v,
+                for (es, (selector, gate_ev)) in folding_errors.iter_mut().zip(
+                    pk.simple_selectors()
+                        .iter()
+                        .zip(folding_gate_evs.iter_mut()),
+                ) {
+                    if let Some(selector) = selector {
+                        if !pk.selectors[selector.index()][row] {
+                            es.fill(C::Scalar::ZERO);
+                            continue;
+                        }
+                    }
+
+                    gate_ev.evaluate_single(
+                        es,
+                        row,
+                        &pk.selectors,
+                        &pk.fixed,
+                        &self.instance_transcript.instance_polys,
+                        &self.advice_transcript.advice_polys,
                     );
                 }
 
-                *error =
-                    zip(ys.iter(), es.iter()).fold(C::Scalar::ZERO, |acc, (y, e)| acc + *y * e);
+                linear_gate_ev.evaluate_single(
+                    &mut linear_errors,
+                    row,
+                    &pk.selectors,
+                    &pk.fixed,
+                    &self.instance_transcript.instance_polys,
+                    &self.advice_transcript.advice_polys,
+                );
+
+                *error += ys
+                    .iter()
+                    .zip(folding_errors.iter().flat_map(|e| e.iter()))
+                    .fold(C::Scalar::ZERO, |acc, (y, e)| acc + *y * e);
+                *error += linear_challenges
+                    .iter()
+                    .zip(linear_errors.iter())
+                    .fold(C::Scalar::ZERO, |acc, (y, e)| acc + *y * e);
                 *error *= self.compressed_verifier_transcript.beta_poly()[row];
             }
         });

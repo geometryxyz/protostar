@@ -12,7 +12,7 @@ use crate::{
 use super::{
     boolean_evaluations_vec, boolean_evaluations_vec_skip_2,
     row::{QueriedExpression, Row, RowQueries},
-    Accumulator, MIN_GATE_DEGREE, NUM_EXTRA_EVALUATIONS, NUM_SKIPPED_EVALUATIONS,
+    Accumulator, NUM_EXTRA_EVALUATIONS, NUM_SKIPPED_EVALUATIONS,
 };
 
 pub struct GateEvaluator<F: Field> {
@@ -79,6 +79,28 @@ impl<F: Field> GateEvaluator<F> {
         }
     }
 
+    // Gate evaluator for when only a single evaluation is required
+    pub fn new_single(polys: &[Expression<F>], challenges: &[Vec<F>], num_rows_i: i32) -> Self {
+        let queries = RowQueries::from_polys(&polys, num_rows_i);
+
+        let queried_polys: Vec<_> = polys
+            .iter()
+            .map(|poly| queries.queried_expression(poly))
+            .collect();
+
+        let queried_challenges = queries.queried_challenges(challenges);
+
+        let row = Row::new(queries);
+        Self {
+            num_evals: vec![1; polys.len()],
+            max_num_evals: 1,
+            challenges_evals: vec![queried_challenges],
+            queried_polys,
+            row,
+            errors_evals: vec![vec![F::ZERO]; polys.len()],
+        }
+    }
+
     /// Evaluates the error polynomial for the populated row.
     /// Returns `None` if the common selector for the gate is false,
     /// otherwise returns a list of vectors containing the evaluations for
@@ -122,6 +144,28 @@ impl<F: Field> GateEvaluator<F> {
             }
         }
         &self.errors_evals
+    }
+
+    /// Evaluates the error polynomial for the populated row.
+    /// Returns `None` if the common selector for the gate is false,
+    /// otherwise returns a list of vectors containing the evaluations for
+    /// each `poly` Gⱼ(X) in `gate`.
+    pub fn evaluate_single(
+        &mut self,
+        evals: &mut [F],
+        row_idx: usize,
+        selectors: &[Vec<bool>],
+        fixed: &[Polynomial<F, LagrangeCoeff>],
+        instance: &[Polynomial<F, LagrangeCoeff>],
+        advice: &[Polynomial<F, LagrangeCoeff>],
+    ) {
+        self.row
+            .populate_all(row_idx, selectors, fixed, instance, advice);
+
+        // Iterate over each polynomial constraint Gⱼ, along with its required number of evaluations
+        for (poly_idx, poly) in self.queried_polys.iter().enumerate() {
+            evals[poly_idx] = self.row.evaluate(poly, &self.challenges_evals[0]);
+        }
     }
 
     /// Returns a zero-initialized error polynomial for storing all evaluations of
