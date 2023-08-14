@@ -35,11 +35,10 @@ impl<F: Field> GateEvaluator<F> {
         polys: &[Expression<F>],
         challenges_acc: &[Vec<F>],
         challenges_new: &[Vec<F>],
-        num_rows_i: i32,
     ) -> Self {
         let degrees: Vec<_> = polys.iter().map(|poly| poly.folding_degree()).collect();
 
-        let queries = RowQueries::from_polys(&polys, num_rows_i);
+        let queries = RowQueries::from_polys(&polys);
 
         let queried_polys: Vec<_> = polys
             .iter()
@@ -80,8 +79,8 @@ impl<F: Field> GateEvaluator<F> {
     }
 
     // Gate evaluator for when only a single evaluation is required
-    pub fn new_single(polys: &[Expression<F>], challenges: &[Vec<F>], num_rows_i: i32) -> Self {
-        let queries = RowQueries::from_polys(&polys, num_rows_i);
+    pub fn new_single(polys: &[Expression<F>], challenges: &[Vec<F>]) -> Self {
+        let queries = RowQueries::from_polys(&polys);
 
         let queried_polys: Vec<_> = polys
             .iter()

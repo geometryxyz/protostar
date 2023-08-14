@@ -14,12 +14,11 @@ pub struct RowQueries {
     instance: Vec<(usize, Rotation)>,
     advice: Vec<(usize, Rotation)>,
     challenges: Vec<(usize, usize)>,
-    num_rows_i: i32,
 }
 
 impl RowQueries {
     // Computes the lists of queried variables for a given list of `Expression`s.
-    pub fn from_polys<F: Field>(polys: &[Expression<F>], num_rows_i: i32) -> Self {
+    pub fn from_polys<F: Field>(polys: &[Expression<F>]) -> Self {
         let mut queried_selectors = BTreeSet::<usize>::new();
         let mut queried_fixed = BTreeSet::<(usize, Rotation)>::new();
         let mut queried_challenges = BTreeSet::<(usize, usize)>::new();
@@ -54,7 +53,6 @@ impl RowQueries {
             instance: queried_instance.into_iter().collect(),
             advice: queried_advice.into_iter().collect(),
             challenges: queried_challenges.into_iter().collect(),
-            num_rows_i,
         }
     }
 
@@ -147,35 +145,17 @@ impl<F: Field> Row<F> {
 
     /// Fetch the row values from queried fixed columns.
     pub fn populate_fixed(&mut self, row_idx: usize, columns: &[Polynomial<F, LagrangeCoeff>]) {
-        Self::fill_row_with_rotations(
-            &mut self.fixed,
-            row_idx,
-            self.queries.num_rows_i,
-            &self.queries.fixed,
-            columns,
-        )
+        Self::fill_row_with_rotations(&mut self.fixed, row_idx, &self.queries.fixed, columns)
     }
 
     /// Fetch the row values from queried instance columns.
     pub fn populate_instance(&mut self, row_idx: usize, columns: &[Polynomial<F, LagrangeCoeff>]) {
-        Self::fill_row_with_rotations(
-            &mut self.instance,
-            row_idx,
-            self.queries.num_rows_i,
-            &self.queries.instance,
-            columns,
-        )
+        Self::fill_row_with_rotations(&mut self.instance, row_idx, &self.queries.instance, columns)
     }
 
     /// Fetch the row values from queried advice columns.
     pub fn populate_advice(&mut self, row_idx: usize, columns: &[Polynomial<F, LagrangeCoeff>]) {
-        Self::fill_row_with_rotations(
-            &mut self.advice,
-            row_idx,
-            self.queries.num_rows_i,
-            &self.queries.advice,
-            columns,
-        )
+        Self::fill_row_with_rotations(&mut self.advice, row_idx, &self.queries.advice, columns)
     }
 
     /// Fetch the row values from two queried sets of instance columns.
@@ -193,7 +173,6 @@ impl<F: Field> Row<F> {
         Self::fill_row_with_rotations(
             &mut self.instance,
             row_idx,
-            self.queries.num_rows_i,
             &self.queries.instance,
             columns_evals1,
         );
@@ -201,7 +180,6 @@ impl<F: Field> Row<F> {
         Self::fill_row_with_rotations(
             &mut self.instance_diff,
             row_idx,
-            self.queries.num_rows_i,
             &self.queries.instance,
             columns_evals0,
         );
@@ -227,7 +205,6 @@ impl<F: Field> Row<F> {
         Self::fill_row_with_rotations(
             &mut self.advice,
             row_idx,
-            self.queries.num_rows_i,
             &self.queries.advice,
             columns_evals1,
         );
@@ -235,7 +212,6 @@ impl<F: Field> Row<F> {
         Self::fill_row_with_rotations(
             &mut self.advice_diff,
             row_idx,
-            self.queries.num_rows_i,
             &self.queries.advice,
             columns_evals0,
         );
@@ -292,14 +268,15 @@ impl<F: Field> Row<F> {
     fn fill_row_with_rotations(
         row: &mut [F],
         row_idx: usize,
-        num_rows_i: i32,
+
         queries: &[(usize, Rotation)],
         columns: &[Polynomial<F, LagrangeCoeff>],
     ) {
         debug_assert_eq!(row.len(), queries.len());
         for (row_value, (column_idx, rotation)) in row.iter_mut().zip(queries.iter()) {
             // ignore overflow since these should not occur in gates
-            let row_idx = (((row_idx as i32) + rotation.0).rem_euclid(num_rows_i)) as usize;
+            let row_idx = (row_idx as i32 + rotation.0) as usize;
+            // let row_idx = (((row_idx as i32) + rotation.0).rem_euclid(num_rows_i)) as usize;
             *row_value = columns[*column_idx][row_idx]
         }
     }

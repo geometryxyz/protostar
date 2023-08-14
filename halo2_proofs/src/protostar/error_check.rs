@@ -96,7 +96,6 @@ impl<C: CurveAffine> Accumulator<C> {
         new: Accumulator<C>,
         transcript: &mut T,
     ) {
-        let num_rows_i = pk.num_rows() as i32;
         let mut gate_caches: Vec<_> = pk
             .folding_constraints()
             .iter()
@@ -105,7 +104,6 @@ impl<C: CurveAffine> Accumulator<C> {
                     polys,
                     &self.advice_transcript.challenges,
                     &new.advice_transcript.challenges,
-                    num_rows_i,
                 )
             })
             .collect();
@@ -242,22 +240,13 @@ impl<C: CurveAffine> Accumulator<C> {
 
         // Evaluate all cached constraint errors
         for (error, final_poly) in self.constraint_errors.iter_mut().zip(final_polys.iter()) {
-            let mut eval = C::Scalar::ZERO;
-            for coeff in final_poly.iter().rev() {
-                eval *= alpha;
-                eval += coeff;
-            }
-            *error = eval;
+            *error = evaluate_poly(&final_poly, alpha);
         }
 
         // Evaluation of e(X) = (1-X)X⋅e'(X) + (1-X)⋅e(0) + X⋅e(1) in alpha
         self.error = {
-            let mut error = C::Scalar::ZERO;
-            for coeff in quotient_poly.iter().rev() {
-                error *= alpha;
-                error += coeff;
-            }
-            error *= alpha.square() - alpha;
+            let mut error = evaluate_poly(&quotient_poly, alpha);
+            error *= alpha - alpha.square();
             error += (C::Scalar::ONE - alpha) * self.error;
             error += alpha * new.error;
             error
@@ -307,7 +296,6 @@ impl<C: CurveAffine> Accumulator<C> {
         let mut errors = vec![C::Scalar::ZERO; pk.num_usable_rows()];
 
         parallelize(&mut errors, |errors, start| {
-            let num_rows_i = pk.num_rows() as i32;
             let ys = self.ys.clone();
 
             let (mut folding_errors, mut folding_gate_evs): (Vec<_>, Vec<_>) = pk
@@ -316,11 +304,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 .map(|polys| {
                     (
                         vec![C::Scalar::ZERO; polys.len()],
-                        GateEvaluator::new_single(
-                            &polys,
-                            &self.advice_transcript.challenges,
-                            num_rows_i,
-                        ),
+                        GateEvaluator::new_single(&polys, &self.advice_transcript.challenges),
                     )
                 })
                 .unzip();
@@ -328,7 +312,6 @@ impl<C: CurveAffine> Accumulator<C> {
             let mut linear_gate_ev = GateEvaluator::new_single(
                 pk.linear_constraints(),
                 &self.advice_transcript.challenges,
-                num_rows_i,
             );
             let mut linear_errors = vec![C::Scalar::ZERO; pk.linear_constraints().len()];
 
@@ -637,20 +620,35 @@ fn quotient_by_boolean_vanishing<F: Field>(poly: &[F]) -> Vec<F> {
 
     let mut tmp = F::ZERO;
 
-    let quotient: Vec<_> = poly
-        .iter()
-        .skip(1)
-        .map(|a_i| {
-            tmp -= a_i;
-            tmp
-        })
-        .take(n - 2)
-        .collect();
+    let mut quotient = vec![F::ZERO; n - 2];
+    for i in 0..(n - 2) {
+        tmp += poly[i + 1];
+        quotient[i] = tmp;
+    }
+
     // p(1) = ∑p_i = 0
     assert_eq!(
-        quotient.last().unwrap(),
-        poly.last().unwrap(),
+        *quotient.last().unwrap(),
+        poly.last().unwrap().neg(),
         "poly(1) != 0"
     );
     quotient
+}
+
+fn evaluate_poly<F: Field>(poly: &[F], point: F) -> F {
+    let mut error = F::ZERO;
+    for coeff in poly.iter().rev() {
+        error *= point;
+        error += coeff;
+    }
+    error
+}
+
+fn multiply_poly_coeffs_by_linear<F: Field>(poly: &[F], coef_0: F, coef_1: F) -> Vec<F> {
+    let mut result = vec![F::ZERO; poly.len() + 1];
+    for (i, a_i) in poly.iter().enumerate() {
+        result[i] += coef_0 * a_i;
+        result[i + 1] += coef_1 * a_i;
+    }
+    result
 }
