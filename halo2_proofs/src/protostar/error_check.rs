@@ -32,7 +32,7 @@ use super::{
 
 /// Each constraint error polynomial must be multiplied by the challenges
 /// beta and y, so we need to evaluate it in 2 additional points.
-const NUM_EXTRA_EVALUATIONS: usize = 2;
+const NUM_EXTRA_EVALUATIONS: usize = 1;
 /// The evaluations of the error polynomials at 0 and 1 correspond to the
 /// evaluation of the constraints in the accumulator and the new witness.
 /// We cache these in `Accumulator` and start evaluating at X=2
@@ -113,7 +113,7 @@ impl<C: CurveAffine> Accumulator<C> {
 
         // Store the sum of the
         // eval_sums[gate_idx][constraint_idx][eval_idx]
-        let mut error_polys: Vec<_> = gate_caches
+        let mut gates_error_polys_evals: Vec<_> = gate_caches
             .iter()
             .map(|gate_cache| gate_cache.empty_error_polynomials())
             .collect();
@@ -148,7 +148,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 // For each constraint in the current gate, scale it by the beta vector
                 // and add it to the corresponding error polynomial accumulator `error_polys`
                 for (acc_error_poly, new_error_poly) in
-                    zip(error_polys[gate_idx].iter_mut(), evals.iter())
+                    zip(gates_error_polys_evals[gate_idx].iter_mut(), evals.iter())
                 {
                     // Multiply each poly by beta and add it to the corresponding accumulator
                     for (acc_error_eval, (new_error_eval, beta_eval)) in acc_error_poly
@@ -162,63 +162,54 @@ impl<C: CurveAffine> Accumulator<C> {
         }
 
         // collect all lists of evaluations
-        let mut final_evals: Vec<_> = error_polys
+        let mut error_polys_evals: Vec<_> = gates_error_polys_evals
             .into_iter()
             .flat_map(|poly| poly.into_iter())
             .collect();
 
-        // multiply each list of evaluations by the challenge y
-        final_evals
-            .iter_mut()
-            .zip(zip(self.ys.iter(), new.ys.iter()))
-            .for_each(|(evals, (y_acc, y_new))| {
-                let y_evals_iter = boolean_evaluations_skip_2(*y_acc, *y_new);
-                for (error_eval, y_eval) in zip(evals.iter_mut(), y_evals_iter) {
-                    *error_eval *= y_eval;
-                }
-            });
-
         // re-insert the evaluations at 0,1 from the cache for each constraint
-        final_evals
+        error_polys_evals
             .iter_mut()
             .zip(zip(
                 self.constraint_errors.iter(),
                 new.constraint_errors.iter(),
             ))
-            .for_each(|(final_evals, (acc_eval, new_eval))| {
-                final_evals.insert(0, *new_eval);
-                final_evals.insert(0, *acc_eval);
+            .for_each(|(error_poly_evals, (acc_eval, new_eval))| {
+                error_poly_evals.insert(0, *new_eval);
+                error_poly_evals.insert(0, *acc_eval);
             });
 
         // convert evaluations into coefficients
-        let final_polys = batch_lagrange_interpolate_integers(&final_evals);
+        let error_polys = batch_lagrange_interpolate_integers(&error_polys_evals);
 
-        // add all polynomials together
-        let mut final_poly = final_polys.iter().fold(
-            vec![C::Scalar::ZERO; max_num_evals + NUM_SKIPPED_EVALUATIONS],
-            |mut final_poly, coeffs| {
-                assert!(coeffs.len() <= final_poly.len());
-                final_poly
-                    .iter_mut()
-                    .zip(coeffs.iter())
-                    .for_each(|(final_coeff, coeff)| *final_coeff += coeff);
-                final_poly
-            },
-        );
+        // multiply each list of evaluations by the challenge y
+        let final_error_poly: Vec<_> = error_polys
+            .iter()
+            .zip(zip(self.ys.iter(), new.ys.iter()))
+            .map(|(error_poly, (y_acc, y_new))| {
+                multiply_poly_coeffs_by_linear(error_poly, *y_acc, *y_new - y_acc)
+            })
+            .fold(
+                vec![C::Scalar::ZERO; max_num_evals + NUM_SKIPPED_EVALUATIONS + 1],
+                |mut final_error_poly, error_poly| {
+                    assert!(error_poly.len() <= final_error_poly.len());
+                    final_error_poly
+                        .iter_mut()
+                        .zip(error_poly.iter())
+                        .for_each(|(final_coeff, coeff)| *final_coeff += coeff);
+                    final_error_poly
+                },
+            );
 
         // The error term for the existing accumulator should be e(0),
         // which is equal to the first coefficient of `final_poly`
-        let expected_error_acc: C::Scalar = final_poly[0];
+        let expected_error_acc: C::Scalar = final_error_poly[0];
         assert_eq!(expected_error_acc, self.error);
 
         // The error term for the fresh accumulator should be e(1),
         // which is equal to the sum of the coefficient of `final_poly`
-        let expected_error_new: C::Scalar = final_poly.iter().sum();
+        let expected_error_new: C::Scalar = final_error_poly.iter().sum();
         assert_eq!(expected_error_new, new.error);
-
-        // Subtract (1-X)⋅acc.error + X⋅new.error
-        final_poly[0] -= self.error;
-        final_poly[1] -= new.error - self.error;
 
         // Compute and commit to quotient
         //
@@ -230,7 +221,14 @@ impl<C: CurveAffine> Accumulator<C> {
         // we can send this polynomial instead and save 2 hashes.
         // The verifier evaluates e(X) as
         //   e(X) = (1-X)X⋅e'(X) + (1-X)⋅e(0) + X⋅e(1)
-        let quotient_poly = quotient_by_boolean_vanishing(&final_poly);
+        let quotient_poly = {
+            let mut pre_quotient_poly = final_error_poly.clone();
+            // Subtract (1-X)⋅acc.error + X⋅new.error
+            pre_quotient_poly[0] -= self.error;
+            pre_quotient_poly[1] -= new.error - self.error;
+
+            quotient_by_boolean_vanishing(&pre_quotient_poly)
+        };
         for coef in quotient_poly.iter() {
             let _ = transcript.write_scalar(*coef);
         }
@@ -239,7 +237,7 @@ impl<C: CurveAffine> Accumulator<C> {
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
 
         // Evaluate all cached constraint errors
-        for (error, final_poly) in self.constraint_errors.iter_mut().zip(final_polys.iter()) {
+        for (error, final_poly) in self.constraint_errors.iter_mut().zip(error_polys.iter()) {
             *error = evaluate_poly(&final_poly, alpha);
         }
 
@@ -249,6 +247,7 @@ impl<C: CurveAffine> Accumulator<C> {
             error *= alpha - alpha.square();
             error += (C::Scalar::ONE - alpha) * self.error;
             error += alpha * new.error;
+            debug_assert_eq!(error, evaluate_poly(&final_error_poly, alpha));
             error
         };
 
