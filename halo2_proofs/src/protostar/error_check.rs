@@ -106,13 +106,13 @@ impl<C: CurveAffine> Accumulator<C> {
         After evaluating all error polynomials for each gate, we consider the flattened list of constraints,
         and index them by `constraint_idx`
         */
-        let gate_selectors = pk.simple_selectors();
+        let gate_selectors = &pk.simple_selectors;
 
         /*
         Compute the number of constraints in each gate as well as the total number of constraints in all gates.
         */
         let num_constraints_per_gate: Vec<_> = pk
-            .folding_constraints()
+            .folding_constraints
             .iter()
             .map(|polys| polys.len())
             .collect();
@@ -129,7 +129,7 @@ impl<C: CurveAffine> Accumulator<C> {
         interpolate the full polynomial.
         */
         let gates_error_polys_num_evals: Vec<Vec<usize>> = pk
-            .folding_constraints()
+            .folding_constraints
             .iter()
             .map(|polys| {
                 polys
@@ -190,7 +190,7 @@ impl<C: CurveAffine> Accumulator<C> {
         so it is advantageous to only fetch the values from the columns once.
          */
         let mut gate_evs: Vec<_> = pk
-            .folding_constraints()
+            .folding_constraints
             .iter()
             .zip(gates_error_polys_num_evals.iter())
             .map(|(polys, num_evals)| {
@@ -440,7 +440,7 @@ impl<C: CurveAffine> Accumulator<C> {
             let ys = self.ys.clone();
 
             let (mut folding_errors, mut folding_gate_evs): (Vec<_>, Vec<_>) = pk
-                .folding_constraints()
+                .folding_constraints
                 .iter()
                 .map(|polys| {
                     (
@@ -451,10 +451,10 @@ impl<C: CurveAffine> Accumulator<C> {
                 .unzip();
 
             let mut linear_gate_ev = GateEvaluator::new_single(
-                pk.linear_constraints(),
+                &pk.linear_constraints,
                 &self.advice_transcript.challenges,
             );
-            let mut linear_errors = vec![C::Scalar::ZERO; pk.linear_constraints().len()];
+            let mut linear_errors = vec![C::Scalar::ZERO; pk.linear_constraints.len()];
 
             let linear_challenge = self
                 .compressed_verifier_transcript
@@ -469,7 +469,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 let row = start + i;
 
                 for (es, (selector, gate_ev)) in folding_errors.iter_mut().zip(
-                    pk.simple_selectors()
+                    pk.simple_selectors
                         .iter()
                         .zip(folding_gate_evs.iter_mut()),
                 ) {

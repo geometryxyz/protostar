@@ -68,7 +68,7 @@ pub fn create_advice_transcript<
         config
     };
 
-    let meta = &pk.cs();
+    let meta = &pk.cs;
 
     // Synthesize the circuit over multiple iterations
 

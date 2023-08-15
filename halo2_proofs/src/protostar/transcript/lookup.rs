@@ -64,7 +64,7 @@ pub(crate) fn create_lookup_transcript<
     mut rng: R,
     transcript: &mut T,
 ) -> LookupTranscipt<C> {
-    let lookups = pk.cs().lookups();
+    let lookups = &pk.cs.lookups();
     let num_lookups = lookups.len();
     if num_lookups == 0 {
         return LookupTranscipt {
@@ -73,7 +73,7 @@ pub(crate) fn create_lookup_transcript<
             singles_transcript: vec![],
         };
     }
-    let num_rows = params.n() as usize - pk.cs().blinding_factors() - 1 as usize;
+    let num_rows = params.n() as usize - pk.cs.blinding_factors() - 1 as usize;
 
     let table_values_map: Vec<_> = lookups
         .iter()
