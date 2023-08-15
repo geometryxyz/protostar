@@ -8,7 +8,7 @@ use crate::{
 };
 
 // For a given `Expression`, stores all queried variables.
-pub struct RowQueries {
+pub struct Queries {
     selectors: Vec<usize>,
     fixed: Vec<(usize, Rotation)>,
     instance: Vec<(usize, Rotation)>,
@@ -16,7 +16,7 @@ pub struct RowQueries {
     challenges: Vec<(usize, usize)>,
 }
 
-impl RowQueries {
+impl Queries {
     // Computes the lists of queried variables for a given list of `Expression`s.
     pub fn from_polys<F: Field>(polys: &[Expression<F>]) -> Self {
         let mut queried_selectors = BTreeSet::<usize>::new();
@@ -110,126 +110,26 @@ impl RowQueries {
 pub struct Row<F: Field> {
     selectors: Vec<F>,
     fixed: Vec<F>,
-    instance: Vec<F>,
-    advice: Vec<F>,
+    instance_evals: Vec<Vec<F>>,
     instance_diff: Vec<F>,
+    advice_evals: Vec<Vec<F>>,
     advice_diff: Vec<F>,
-    queries: RowQueries,
+    queries: Queries,
+    num_evals: usize,
 }
 
 impl<F: Field> Row<F> {
     /// Create new buffers of the same size as the query sets in `queries`.
-    pub fn new(queries: RowQueries) -> Self {
+    pub fn new(queries: Queries, num_evals: usize) -> Self {
         Self {
             selectors: vec![F::ZERO; queries.selectors.len()],
             fixed: vec![F::ZERO; queries.fixed.len()],
-            instance: vec![F::ZERO; queries.instance.len()],
-            advice: vec![F::ZERO; queries.advice.len()],
+            instance_evals: vec![vec![F::ZERO; queries.instance.len()]; num_evals],
+            advice_evals: vec![vec![F::ZERO; queries.advice.len()]; num_evals],
             instance_diff: vec![F::ZERO; queries.instance.len()],
             advice_diff: vec![F::ZERO; queries.advice.len()],
             queries,
-        }
-    }
-
-    /// Fetch the queried selectors.
-    pub fn populate_selectors(&mut self, row_idx: usize, columns: &[Vec<bool>]) {
-        for (row_value, column_idx) in self.selectors.iter_mut().zip(self.queries.selectors.iter())
-        {
-            *row_value = if columns[*column_idx][row_idx] {
-                F::ONE
-            } else {
-                F::ZERO
-            }
-        }
-    }
-
-    /// Fetch the row values from queried fixed columns.
-    pub fn populate_fixed(&mut self, row_idx: usize, columns: &[Polynomial<F, LagrangeCoeff>]) {
-        Self::fill_row_with_rotations(&mut self.fixed, row_idx, &self.queries.fixed, columns)
-    }
-
-    /// Fetch the row values from queried instance columns.
-    pub fn populate_instance(&mut self, row_idx: usize, columns: &[Polynomial<F, LagrangeCoeff>]) {
-        Self::fill_row_with_rotations(&mut self.instance, row_idx, &self.queries.instance, columns)
-    }
-
-    /// Fetch the row values from queried advice columns.
-    pub fn populate_advice(&mut self, row_idx: usize, columns: &[Polynomial<F, LagrangeCoeff>]) {
-        Self::fill_row_with_rotations(&mut self.advice, row_idx, &self.queries.advice, columns)
-    }
-
-    /// Fetch the row values from two queried sets of instance columns.
-    /// Each pair is interpreted as boolean low-degree extension.
-    /// `self.instance` holds the evaluation at 1, and
-    /// `self.instance_diff` contains the linear coefficient of the polynomial.
-    /// Calling `self.populate_next_evals` will set `self.instance` to be the evaluation at 2.
-    pub fn populate_instance_evals_skip_1(
-        &mut self,
-        row_idx: usize,
-        columns_evals0: &[Polynomial<F, LagrangeCoeff>],
-        columns_evals1: &[Polynomial<F, LagrangeCoeff>],
-    ) {
-        // instance = evals1
-        Self::fill_row_with_rotations(
-            &mut self.instance,
-            row_idx,
-            &self.queries.instance,
-            columns_evals1,
-        );
-        // diff = evals0
-        Self::fill_row_with_rotations(
-            &mut self.instance_diff,
-            row_idx,
-            &self.queries.instance,
-            columns_evals0,
-        );
-        // diff = eval1 - evals0
-        for (eval0, eval1) in self.instance_diff.iter_mut().zip(self.instance.iter()) {
-            let diff = *eval1 - *eval0;
-            *eval0 = diff;
-        }
-    }
-
-    /// Fetch the row values from two queried sets of advice columns.
-    /// Each pair is interpreted as boolean low-degree extension.
-    /// `self.advice` holds the evaluation at 1, and
-    /// `self.advice_diff` contains the linear coefficient of the polynomial.
-    /// Calling `self.populate_next_evals` will set `self.advice` to be the evaluation at 2.
-    pub fn populate_advice_evals_skip_1(
-        &mut self,
-        row_idx: usize,
-        columns_evals0: &[Polynomial<F, LagrangeCoeff>],
-        columns_evals1: &[Polynomial<F, LagrangeCoeff>],
-    ) {
-        // advice = evals1
-        Self::fill_row_with_rotations(
-            &mut self.advice,
-            row_idx,
-            &self.queries.advice,
-            columns_evals1,
-        );
-        // diff = evals0
-        Self::fill_row_with_rotations(
-            &mut self.advice_diff,
-            row_idx,
-            &self.queries.advice,
-            columns_evals0,
-        );
-        // diff = eval1 - evals0
-        for (eval0, eval1) in self.advice_diff.iter_mut().zip(self.advice.iter()) {
-            let diff = *eval1 - *eval0;
-            *eval0 = diff;
-        }
-    }
-
-    /// Updates both `self.instance` and `self.advice` to the next evaluation over the integers
-    /// of the boolean low-degree extensions they correspond to.
-    pub fn populate_next_evals(&mut self) {
-        for (curr, diff) in zip(self.instance.iter_mut(), self.instance_diff.iter()) {
-            *curr += diff;
-        }
-        for (curr, diff) in zip(self.advice.iter_mut(), self.advice_diff.iter()) {
-            *curr += diff;
+            num_evals,
         }
     }
 
@@ -244,24 +144,113 @@ impl<F: Field> Row<F> {
     ) {
         self.populate_selectors(row_idx, selectors);
         self.populate_fixed(row_idx, fixed);
-        self.populate_instance(row_idx, instance);
-        self.populate_advice(row_idx, advice);
+        self.populate_instance(row_idx, 0, instance);
+        self.populate_advice(row_idx, 0, advice);
+    }
+
+    /// Fills the local variables buffers with data from the accumulator and new transcript
+    pub fn populate_all_evaluated(
+        &mut self,
+        row_idx: usize,
+        selectors: &[Vec<bool>],
+        fixed: &[Polynomial<F, LagrangeCoeff>],
+        instance_0: &[Polynomial<F, LagrangeCoeff>],
+        instance_1: &[Polynomial<F, LagrangeCoeff>],
+        advice_0: &[Polynomial<F, LagrangeCoeff>],
+        advice_1: &[Polynomial<F, LagrangeCoeff>],
+    ) {
+        self.populate_selectors(row_idx, selectors);
+        self.populate_fixed(row_idx, fixed);
+
+        self.populate_advice(row_idx, 0, advice_0);
+        self.populate_advice(row_idx, 1, advice_1);
+        let num_advice = self.queries.advice.len();
+
+        for i in 0..num_advice {
+            self.advice_diff[i] = self.advice_evals[1][i] - self.advice_evals[0][i]
+        }
+        for eval_idx in 2..self.num_evals {
+            for i in 0..num_advice {
+                self.advice_evals[eval_idx][i] =
+                    self.advice_evals[eval_idx - 1][i] + self.advice_diff[i];
+            }
+        }
+
+        self.populate_instance(row_idx, 0, instance_0);
+        self.populate_instance(row_idx, 1, instance_1);
+        let num_instance = self.queries.instance.len();
+        for i in 0..num_instance {
+            self.instance_diff[i] = self.instance_evals[1][i] - self.instance_evals[0][i]
+        }
+        for eval_idx in 2..self.num_evals {
+            for i in 0..num_instance {
+                self.instance_evals[eval_idx][i] =
+                    self.instance_evals[eval_idx - 1][i] + self.instance_diff[i];
+            }
+        }
     }
 
     /// Evaluate `poly` with the current values stored in the buffers.
-    pub fn evaluate(&self, poly: &QueriedExpression<F>, challenges: &[F]) -> F {
+    pub fn evaluate_at(&self, eval_idx: usize, poly: &QueriedExpression<F>, challenges: &[F]) -> F {
         // evaluate the j-th constraint G_j at X = eval_idx
         poly.evaluate(
             &|constant| constant,
             &|selector_idx| self.selectors[selector_idx],
             &|fixed_idx| self.fixed[fixed_idx],
-            &|advice_idx| self.advice[advice_idx],
-            &|instance_idx| self.instance[instance_idx],
+            &|advice_idx| self.advice_evals[eval_idx][advice_idx],
+            &|instance_idx| self.instance_evals[eval_idx][instance_idx],
             &|challenge_idx| challenges[challenge_idx],
             &|negated| -negated,
             &|sum_a, sum_b| sum_a + sum_b,
             &|prod_a, prod_b| prod_a * prod_b,
             &|scaled, v| scaled * v,
+        )
+    }
+
+    /// Fetch the queried selectors.
+    fn populate_selectors(&mut self, row_idx: usize, columns: &[Vec<bool>]) {
+        for (row_value, column_idx) in self.selectors.iter_mut().zip(self.queries.selectors.iter())
+        {
+            *row_value = if columns[*column_idx][row_idx] {
+                F::ONE
+            } else {
+                F::ZERO
+            }
+        }
+    }
+
+    /// Fetch the row values from queried fixed columns.
+    fn populate_fixed(&mut self, row_idx: usize, columns: &[Polynomial<F, LagrangeCoeff>]) {
+        Self::fill_row_with_rotations(&mut self.fixed, row_idx, &self.queries.fixed, columns)
+    }
+
+    /// Fetch the row values from queried instance columns.
+    fn populate_instance(
+        &mut self,
+        row_idx: usize,
+        eval_idx: usize,
+        columns: &[Polynomial<F, LagrangeCoeff>],
+    ) {
+        Self::fill_row_with_rotations(
+            &mut self.instance_evals[eval_idx],
+            row_idx,
+            &self.queries.instance,
+            columns,
+        )
+    }
+
+    /// Fetch the row values from queried advice columns.
+    fn populate_advice(
+        &mut self,
+        row_idx: usize,
+        eval_idx: usize,
+        columns: &[Polynomial<F, LagrangeCoeff>],
+    ) {
+        Self::fill_row_with_rotations(
+            &mut self.advice_evals[eval_idx],
+            row_idx,
+            &self.queries.advice,
+            columns,
         )
     }
 
@@ -272,7 +261,9 @@ impl<F: Field> Row<F> {
         queries: &[(usize, Rotation)],
         columns: &[Polynomial<F, LagrangeCoeff>],
     ) {
-        debug_assert_eq!(row.len(), queries.len());
+        let row_len = row.len();
+        debug_assert_eq!(queries.len(), row_len);
+
         for (row_value, (column_idx, rotation)) in row.iter_mut().zip(queries.iter()) {
             // ignore overflow since these should not occur in gates
             let row_idx = (row_idx as i32 + rotation.0) as usize;
