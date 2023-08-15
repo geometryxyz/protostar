@@ -44,27 +44,27 @@ pub enum Error {
 }
 
 /// The basis over which a polynomial is described.
-pub trait Basis: Copy + Debug + Send + Sync {}
+pub trait Basis: Copy + Debug + Send + Sync + PartialEq + Default {}
 
 /// The polynomial is defined as coefficients
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Coeff;
 impl Basis for Coeff {}
 
 /// The polynomial is defined as coefficients of Lagrange basis polynomials
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct LagrangeCoeff;
 impl Basis for LagrangeCoeff {}
 
 /// The polynomial is defined as coefficients of Lagrange basis polynomials in
 /// an extended size domain which supports multiplication
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct ExtendedLagrangeCoeff;
 impl Basis for ExtendedLagrangeCoeff {}
 
 /// Represents a univariate polynomial defined over a field and a particular
 /// basis.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Polynomial<F, B> {
     values: Vec<F>,
     _marker: PhantomData<B>,

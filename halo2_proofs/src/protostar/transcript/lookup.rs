@@ -1,42 +1,51 @@
 use core::num;
-use ff::{BatchInvert, Field, PrimeField};
+use ff::{BatchInvert, Field, FromUniformBytes, PrimeField};
 use group::Curve;
 use halo2curves::CurveAffine;
 use rand_core::RngCore;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     iter::zip,
     ops::{Mul, MulAssign},
 };
 
 use crate::{
     arithmetic::{parallelize, powers},
-    plonk::{evaluation::evaluate, lookup::Argument, Expression},
+    plonk::{
+        evaluation::evaluate,
+        lookup::{self, Argument},
+        Error, Expression,
+    },
     poly::{
         commitment::{Blind, Params},
         empty_lagrange, lagrange_from_vec, LagrangeCoeff, Polynomial,
     },
-    protostar::keygen::ProvingKey,
+    protostar::{error_check, keygen::ProvingKey},
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LookupTranscipt<C: CurveAffine> {
-    pub challanges_theta: Vec<C::Scalar>,
+    pub thetas: Option<Vec<C::Scalar>>,
+    pub r: Option<C::Scalar>,
+    pub singles_transcript: Vec<LookupTranscriptSingle<C>>,
+}
 
-    pub m_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    pub m_commitments: Vec<C>,
-    pub m_blinds: Vec<Blind<C::Scalar>>,
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LookupTranscriptSingle<C: CurveAffine> {
+    pub theta: C::Scalar,
 
-    pub challenge_r: C::Scalar,
+    pub m_poly: Polynomial<C::Scalar, LagrangeCoeff>,
+    pub m_commitment: C,
+    pub m_blind: Blind<C::Scalar>,
 
-    pub g_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    pub g_commitments: Vec<C>,
-    pub g_blinds: Vec<Blind<C::Scalar>>,
+    pub g_poly: Polynomial<C::Scalar, LagrangeCoeff>,
+    pub g_commitment: C,
+    pub g_blind: Blind<C::Scalar>,
 
-    pub h_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    pub h_commitments: Vec<C>,
-    pub h_blinds: Vec<Blind<C::Scalar>>,
+    pub h_poly: Polynomial<C::Scalar, LagrangeCoeff>,
+    pub h_commitment: C,
+    pub h_blind: Blind<C::Scalar>,
 }
 
 pub(crate) fn create_lookup_transcript<
@@ -49,27 +58,73 @@ pub(crate) fn create_lookup_transcript<
 >(
     params: &P,
     pk: &ProvingKey<C>,
-    advice_values: &[Polynomial<C::Scalar, LagrangeCoeff>],
-    instance_values: &[Polynomial<C::Scalar, LagrangeCoeff>],
-    challenges: &[C::Scalar],
+    challenges: &[Vec<C::Scalar>],
+    advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
     mut rng: R,
     transcript: &mut T,
-) -> Option<LookupTranscipt<C>> {
+) -> LookupTranscipt<C> {
     let lookups = pk.cs().lookups();
     let num_lookups = lookups.len();
     if num_lookups == 0 {
-        return None;
+        return LookupTranscipt {
+            thetas: None,
+            r: None,
+            singles_transcript: vec![],
+        };
+    }
+    let num_rows = params.n() as usize - pk.cs().blinding_factors() - 1 as usize;
+
+    let table_values_map: Vec<_> = lookups
+        .iter()
+        .map(|lookup| {
+            build_lookup_index_table(
+                lookup.table_expressions(),
+                num_rows,
+                challenges,
+                &pk.selectors,
+                &pk.fixed,
+                instance,
+                advice,
+            )
+        })
+        .collect();
+
+    let m_polys: Vec<_> = lookups
+        .iter()
+        .zip(table_values_map.iter())
+        .map(|(lookup, table_index_map)| {
+            build_m_poly(
+                lookup.input_expressions(),
+                table_index_map,
+                num_rows,
+                challenges,
+                &pk.selectors,
+                &pk.fixed,
+                instance,
+                advice,
+            )
+            .unwrap()
+        })
+        .collect();
+
+    let (m_commitments_projective, m_blinds): (Vec<_>, Vec<_>) = m_polys
+        .iter()
+        .map(|m_poly| {
+            let m_blind = Blind::new(&mut rng);
+            (params.commit_lagrange(&m_poly, m_blind.clone()), m_blind)
+        })
+        .unzip();
+
+    let mut m_commitments = vec![C::identity(); num_lookups];
+    C::CurveExt::batch_normalize(&m_commitments_projective, &mut m_commitments);
+
+    // write commitment of m(X) to transcript
+    for m_commitment in m_commitments.iter() {
+        let _ = transcript.write_point(*m_commitment);
     }
 
-    // TODO(@adr1anh): Fix soundness bug:
-    // The challenge theta must be sampled after having committed to the m's
-    // It should be sampled at the same time as r.
-    // This is very annoying since we use theta to compress the table columns and efficiently lookup indices.
-    // Proposed solution:
-    // During preprocessing, we create a HashMap<Vec<C::Scalar>, usize> for each lookup argument,
-    // and use it to lookup the indices.
-
-    let theta = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+    let [theta, r] = [(); 2].map(|_| *transcript.squeeze_challenge_scalar::<C::Scalar>());
 
     let num_thetas = lookups
         .iter()
@@ -83,213 +138,319 @@ pub(crate) fn create_lookup_transcript<
         .unwrap();
     let thetas: Vec<_> = powers(theta).skip(1).take(num_thetas).collect();
 
-    // Closure to get values of expressions and compress them
-    let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
-        let compressed_expression = expressions
-            .iter()
-            .map(|expression| {
-                lagrange_from_vec(evaluate(
-                    expression,
-                    params.n() as usize,
-                    1,
-                    &pk.fixed,
-                    advice_values,
-                    instance_values,
-                    &challenges,
-                ))
-            })
-            .enumerate()
-            .fold(
-                empty_lagrange(params.n() as usize),
-                |acc, (i, expression)| acc * thetas[i] + &expression,
-            );
-        compressed_expression
-    };
+    let g_polys: Vec<_> = lookups
+        .iter()
+        .map(|lookup| {
+            build_g_poly(
+                lookup.input_expressions(),
+                num_rows,
+                challenges,
+                &pk.selectors,
+                &pk.fixed,
+                instance,
+                advice,
+                &thetas,
+                r,
+            )
+            .unwrap()
+        })
+        .collect();
 
-    let mut compressed_inputs = Vec::<_>::with_capacity(num_lookups);
-    let mut compressed_tables = Vec::<_>::with_capacity(num_lookups);
-
-    let mut m_polys = Vec::<_>::with_capacity(num_lookups);
-    let mut m_blinds = Vec::<_>::with_capacity(num_lookups);
-    let mut m_commitments_projective = Vec::<_>::with_capacity(num_lookups);
-
-    for lookup in lookups {
-        // Get values of input expressions involved in the lookup and compress them
-        let compressed_input_expression = compress_expressions(lookup.input_expressions());
-
-        // Get values of table expressions involved in the lookup and compress them
-        let compressed_table_expression = compress_expressions(lookup.table_expressions());
-
-        let blinding_factors = pk.cs().blinding_factors();
-
-        // compute m(X)
-        let table_index_value_mapping: BTreeMap<C::Scalar, usize> = compressed_table_expression
-            .iter()
-            .take(params.n() as usize - blinding_factors - 1)
-            .enumerate()
-            .map(|(i, &x)| (x, i))
-            .collect();
-
-        let mut m_poly = empty_lagrange(params.n() as usize);
-
-        compressed_input_expression
-            .iter()
-            .take(params.n() as usize - blinding_factors - 1)
-            .for_each(|fi| {
-                let index = table_index_value_mapping.get(fi).unwrap_or_else(|| {
-                    panic!("in lookup: {}, value: {:?} not in table", lookup.name(), fi)
-                });
-                m_poly[*index] += C::Scalar::ONE;
-            });
-
-        compressed_inputs.push(compressed_input_expression);
-        compressed_tables.push(compressed_table_expression);
-
-        // commit to m(X)
-        let m_blind = Blind::new(&mut rng);
-        let m_commitment_projective = params.commit_lagrange(&m_poly, m_blind);
-
-        m_polys.push(m_poly);
-        m_commitments_projective.push(m_commitment_projective);
-        m_blinds.push(m_blind);
-    }
-
-    let mut m_commitments = vec![C::identity(); num_lookups];
-    C::CurveExt::batch_normalize(&m_commitments_projective, &mut m_commitments);
-
-    // write commitment of m(X) to transcript
-    for m_commitment in m_commitments.iter() {
-        let _ = transcript.write_point(*m_commitment);
-    }
-
-    let r = *transcript.squeeze_challenge_scalar::<C::Scalar>();
-
-    let mut g_polys = Vec::<_>::with_capacity(num_lookups);
-    let mut g_blinds = Vec::<_>::with_capacity(num_lookups);
-    let mut g_commitments_projective = Vec::<_>::with_capacity(num_lookups);
-
-    let mut h_polys = Vec::<_>::with_capacity(num_lookups);
-    let mut h_blinds = Vec::<_>::with_capacity(num_lookups);
-    let mut h_commitments_projective = Vec::<_>::with_capacity(num_lookups);
-
-    for i in 0..num_lookups {
-        let mut g_poly = empty_lagrange(params.n() as usize);
-
-        parallelize(&mut g_poly, |g_poly, start| {
-            for (g_i, fi) in g_poly.iter_mut().zip(compressed_inputs[i][start..].iter()) {
-                *g_i = r + fi;
-            }
-        });
-        g_poly.iter_mut().batch_invert();
-
-        let mut h_poly = empty_lagrange(params.n() as usize);
-        parallelize(&mut h_poly, |h_poly, start| {
-            for (h_i, ti) in h_poly.iter_mut().zip(compressed_tables[i][start..].iter()) {
-                *h_i = r + ti;
-            }
-        });
-        h_poly.iter_mut().batch_invert();
-
-        // commit to g(X)
-        let g_blind = Blind::new(&mut rng);
-        let g_commitment_projective = params.commit_lagrange(&g_poly, g_blind);
-
-        g_polys.push(g_poly);
-        g_commitments_projective.push(g_commitment_projective);
-        g_blinds.push(g_blind);
-        // commit to h(X)
-        let h_blind = Blind::new(&mut rng);
-        let h_commitment_projective = params.commit_lagrange(&h_poly, h_blind);
-
-        h_polys.push(h_poly);
-        h_commitments_projective.push(h_commitment_projective);
-        h_blinds.push(h_blind);
-    }
+    let (g_commitments_projective, g_blinds): (Vec<_>, Vec<_>) = g_polys
+        .iter()
+        .map(|g_poly| {
+            let g_blind = Blind::default();
+            (params.commit_lagrange(g_poly, g_blind.clone()), g_blind)
+        })
+        .unzip();
 
     let mut g_commitments = vec![C::identity(); num_lookups];
     C::CurveExt::batch_normalize(&g_commitments_projective, &mut g_commitments);
-
     // write commitment of g(X) to transcript
     for g_commitment in g_commitments.iter() {
         let _ = transcript.write_point(*g_commitment);
     }
 
+    let h_polys: Vec<_> = lookups
+        .iter()
+        .zip(m_polys.iter())
+        .map(|(lookup, m_poly)| {
+            build_h_poly(
+                lookup.table_expressions(),
+                num_rows,
+                challenges,
+                &pk.selectors,
+                &pk.fixed,
+                instance,
+                advice,
+                m_poly,
+                &thetas,
+                r,
+            )
+            .unwrap()
+        })
+        .collect();
+
+    let (h_commitments_projective, h_blinds): (Vec<_>, Vec<_>) = h_polys
+        .iter()
+        .map(|h_poly| {
+            let h_blind = Blind::default();
+            (params.commit_lagrange(&h_poly, h_blind.clone()), h_blind)
+        })
+        .unzip();
+
     let mut h_commitments = vec![C::identity(); num_lookups];
     C::CurveExt::batch_normalize(&h_commitments_projective, &mut h_commitments);
-
-    // write commitment of h(X) to transcript
+    // write commitment of g(X) to transcript
     for h_commitment in h_commitments.iter() {
         let _ = transcript.write_point(*h_commitment);
     }
 
-    Some(LookupTranscipt {
-        challanges_theta: thetas,
-        m_polys,
-        m_commitments,
-        m_blinds,
-        challenge_r: r,
-        g_polys,
-        g_commitments,
-        g_blinds,
-        h_polys,
-        h_commitments,
-        h_blinds,
-    })
+    let mut singles_transcript = vec![LookupTranscriptSingle::default(); num_lookups];
+
+    for (i, m_poly) in m_polys.into_iter().enumerate() {
+        singles_transcript[i].m_poly = m_poly;
+    }
+    for (i, m_commitment) in m_commitments.into_iter().enumerate() {
+        singles_transcript[i].m_commitment = m_commitment;
+    }
+    for (i, m_blind) in m_blinds.into_iter().enumerate() {
+        singles_transcript[i].m_blind = m_blind;
+    }
+    for (i, h_poly) in h_polys.into_iter().enumerate() {
+        singles_transcript[i].h_poly = h_poly;
+    }
+    for (i, h_commitment) in h_commitments.into_iter().enumerate() {
+        singles_transcript[i].h_commitment = h_commitment;
+    }
+    for (i, h_blind) in h_blinds.into_iter().enumerate() {
+        singles_transcript[i].h_blind = h_blind;
+    }
+    for (i, g_poly) in g_polys.into_iter().enumerate() {
+        singles_transcript[i].g_poly = g_poly;
+    }
+    for (i, g_commitment) in g_commitments.into_iter().enumerate() {
+        singles_transcript[i].g_commitment = g_commitment;
+    }
+    for (i, g_blind) in g_blinds.into_iter().enumerate() {
+        singles_transcript[i].g_blind = g_blind;
+    }
+
+    LookupTranscipt {
+        thetas: Some(thetas),
+        r: Some(r),
+        singles_transcript,
+    }
 }
 impl<C: CurveAffine> LookupTranscipt<C> {
     pub fn challenges_iter(&self) -> impl Iterator<Item = &C::Scalar> {
-        self.challanges_theta
+        self.thetas
             .iter()
-            .chain(std::iter::once(&self.challenge_r))
+            .flat_map(|c| c.iter())
+            .chain(self.r.iter().flat_map(|c| std::iter::once(c)))
     }
 
     pub fn challenges_iter_mut(&mut self) -> impl Iterator<Item = &mut C::Scalar> {
-        self.challanges_theta
+        self.thetas
             .iter_mut()
-            .chain(std::iter::once(&mut self.challenge_r))
+            .flat_map(|c| c.iter_mut())
+            .chain(self.r.iter_mut().flat_map(|c| std::iter::once(c)))
     }
 
     pub fn polynomials_iter(&self) -> impl Iterator<Item = &Polynomial<C::Scalar, LagrangeCoeff>> {
-        self.m_polys
-            .iter()
-            .chain(self.g_polys.iter())
-            .chain(self.h_polys.iter())
+        self.singles_transcript.iter().flat_map(|transcript| {
+            std::iter::once(&transcript.m_poly)
+                .chain(std::iter::once(&transcript.g_poly))
+                .chain(std::iter::once(&transcript.h_poly))
+        })
     }
 
     pub fn polynomials_iter_mut(
         &mut self,
     ) -> impl Iterator<Item = &mut Polynomial<C::Scalar, LagrangeCoeff>> {
-        self.m_polys
-            .iter_mut()
-            .chain(self.g_polys.iter_mut())
-            .chain(self.h_polys.iter_mut())
+        self.singles_transcript.iter_mut().flat_map(|transcript| {
+            std::iter::once(&mut transcript.m_poly)
+                .chain(std::iter::once(&mut transcript.g_poly))
+                .chain(std::iter::once(&mut transcript.h_poly))
+        })
     }
 
     pub fn commitments_iter(&self) -> impl Iterator<Item = &C> {
-        self.m_commitments
-            .iter()
-            .chain(self.g_commitments.iter())
-            .chain(self.h_commitments.iter())
+        self.singles_transcript.iter().flat_map(|transcript| {
+            std::iter::once(&transcript.m_commitment)
+                .chain(std::iter::once(&transcript.g_commitment))
+                .chain(std::iter::once(&transcript.h_commitment))
+        })
     }
 
     pub fn commitments_iter_mut(&mut self) -> impl Iterator<Item = &mut C> {
-        self.m_commitments
-            .iter_mut()
-            .chain(self.g_commitments.iter_mut())
-            .chain(self.h_commitments.iter_mut())
+        self.singles_transcript.iter_mut().flat_map(|transcript| {
+            std::iter::once(&mut transcript.m_commitment)
+                .chain(std::iter::once(&mut transcript.g_commitment))
+                .chain(std::iter::once(&mut transcript.h_commitment))
+        })
     }
 
     pub fn blinds_iter(&self) -> impl Iterator<Item = &Blind<C::Scalar>> {
-        self.m_blinds
-            .iter()
-            .chain(self.g_blinds.iter())
-            .chain(self.h_blinds.iter())
+        self.singles_transcript.iter().flat_map(|transcript| {
+            std::iter::once(&transcript.m_blind)
+                .chain(std::iter::once(&transcript.g_blind))
+                .chain(std::iter::once(&transcript.h_blind))
+        })
     }
 
     pub fn blinds_iter_mut(&mut self) -> impl Iterator<Item = &mut Blind<C::Scalar>> {
-        self.m_blinds
-            .iter_mut()
-            .chain(self.g_blinds.iter_mut())
-            .chain(self.h_blinds.iter_mut())
+        self.singles_transcript.iter_mut().flat_map(|transcript| {
+            std::iter::once(&mut transcript.m_blind)
+                .chain(std::iter::once(&mut transcript.g_blind))
+                .chain(std::iter::once(&mut transcript.h_blind))
+        })
     }
+}
+
+fn build_lookup_index_table<F: PrimeField>(
+    table_expressions: &[Expression<F>],
+    num_rows: usize,
+    challenges: &[Vec<F>],
+    selectors: &[Vec<bool>],
+    fixed: &[Polynomial<F, LagrangeCoeff>],
+    instance: &[Polynomial<F, LagrangeCoeff>],
+    advice: &[Polynomial<F, LagrangeCoeff>],
+) -> HashMap<Vec<u8>, usize> {
+    let mut table_evaluator =
+        error_check::gate::GateEvaluator::new_single(table_expressions, challenges);
+
+    let mut map: HashMap<Vec<u8>, usize> = HashMap::new();
+
+    let mut row_evals = vec![F::ZERO; table_expressions.len()];
+    let mut row_evals_repr: Vec<u8> = Vec::new();
+
+    for row_idx in 0..num_rows {
+        table_evaluator.evaluate_single(
+            &mut row_evals,
+            row_idx,
+            selectors,
+            fixed,
+            instance,
+            advice,
+        );
+        row_evals_repr.clear();
+        for e in row_evals.iter() {
+            row_evals_repr.extend(e.to_repr().as_ref().iter());
+        }
+        map.insert(row_evals_repr.clone(), row_idx);
+    }
+    map
+}
+
+fn build_m_poly<F: PrimeField>(
+    lookup_expressions: &[Expression<F>],
+    table_index_map: &HashMap<Vec<u8>, usize>,
+    num_rows: usize,
+    challenges: &[Vec<F>],
+    selectors: &[Vec<bool>],
+    fixed: &[Polynomial<F, LagrangeCoeff>],
+    instance: &[Polynomial<F, LagrangeCoeff>],
+    advice: &[Polynomial<F, LagrangeCoeff>],
+) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
+    let mut lookup_evaluator =
+        error_check::gate::GateEvaluator::new_single(lookup_expressions, challenges);
+
+    let mut row_evals = vec![F::ZERO; lookup_expressions.len()];
+    let mut row_evals_repr: Vec<u8> = Vec::new();
+
+    let mut m_poly = empty_lagrange(num_rows);
+
+    for row_idx in 0..num_rows {
+        lookup_evaluator.evaluate_single(
+            &mut row_evals,
+            row_idx,
+            selectors,
+            fixed,
+            instance,
+            advice,
+        );
+        row_evals_repr.clear();
+        for e in row_evals.iter() {
+            row_evals_repr.extend(e.to_repr().as_ref().iter());
+        }
+        if let Some(index) = table_index_map.get(&row_evals_repr) {
+            m_poly[*index] += F::ONE;
+        } else {
+            return Err(Error::BoundsFailure);
+        }
+    }
+    Ok(m_poly)
+}
+
+fn build_g_poly<F: PrimeField>(
+    lookup_expressions: &[Expression<F>],
+    num_rows: usize,
+    challenges: &[Vec<F>],
+    selectors: &[Vec<bool>],
+    fixed: &[Polynomial<F, LagrangeCoeff>],
+    instance: &[Polynomial<F, LagrangeCoeff>],
+    advice: &[Polynomial<F, LagrangeCoeff>],
+    thetas: &[F],
+    r: F,
+) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
+    let mut lookup_evaluator =
+        error_check::gate::GateEvaluator::new_single(lookup_expressions, challenges);
+
+    let mut row_evals = vec![F::ZERO; lookup_expressions.len()];
+
+    let mut g_poly = empty_lagrange(num_rows);
+
+    for row_idx in 0..num_rows {
+        lookup_evaluator.evaluate_single(
+            &mut row_evals,
+            row_idx,
+            selectors,
+            fixed,
+            instance,
+            advice,
+        );
+        g_poly[row_idx] =
+            zip(row_evals.iter(), thetas.iter()).fold(r, |acc, (eval, theta)| acc + *eval * theta);
+    }
+    g_poly.iter_mut().batch_invert();
+    Ok(g_poly)
+}
+
+fn build_h_poly<F: PrimeField>(
+    table_expressions: &[Expression<F>],
+    num_rows: usize,
+    challenges: &[Vec<F>],
+    selectors: &[Vec<bool>],
+    fixed: &[Polynomial<F, LagrangeCoeff>],
+    instance: &[Polynomial<F, LagrangeCoeff>],
+    advice: &[Polynomial<F, LagrangeCoeff>],
+    m_poly: &Polynomial<F, LagrangeCoeff>,
+    thetas: &[F],
+    r: F,
+) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
+    let mut table_evaluator =
+        error_check::gate::GateEvaluator::new_single(table_expressions, challenges);
+
+    let mut row_evals = vec![F::ZERO; table_expressions.len()];
+
+    let mut h_poly = empty_lagrange(num_rows);
+
+    for row_idx in 0..num_rows {
+        table_evaluator.evaluate_single(
+            &mut row_evals,
+            row_idx,
+            selectors,
+            fixed,
+            instance,
+            advice,
+        );
+        h_poly[row_idx] =
+            zip(row_evals.iter(), thetas.iter()).fold(r, |acc, (eval, theta)| acc + *eval * theta);
+    }
+    h_poly.iter_mut().batch_invert();
+    for row_idx in 0..num_rows {
+        h_poly[row_idx] *= m_poly[row_idx];
+    }
+    Ok(h_poly)
 }

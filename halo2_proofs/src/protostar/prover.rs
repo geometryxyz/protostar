@@ -61,16 +61,13 @@ pub fn create_accumulator<
         transcript,
     )?;
 
-    // Extract the gate challenges from the advice transcript
-    let challenges = advice_transcript.challenges();
-
     // Run the 2-round logUp IOP for all lookup arguments
     let lookup_transcript = create_lookup_transcript(
         params,
         pk,
+        &advice_transcript.challenges,
         &advice_transcript.advice_polys,
         &instance_transcript.instance_polys,
-        &challenges,
         rng,
         transcript,
     );

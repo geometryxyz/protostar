@@ -5,7 +5,7 @@ use std::{
     ops::{Add, Deref, DerefMut, Index, IndexMut, RangeFrom, RangeFull, Sub},
 };
 
-mod gate;
+pub(crate) mod gate;
 mod row;
 
 use crate::{
@@ -43,7 +43,7 @@ const STARTING_EVAL_IDX: usize = 2;
 pub struct Accumulator<C: CurveAffine> {
     instance_transcript: InstanceTranscript<C>,
     advice_transcript: AdviceTranscript<C>,
-    lookup_transcript: Option<LookupTranscipt<C>>,
+    lookup_transcript: LookupTranscipt<C>,
     compressed_verifier_transcript: CompressedVerifierTranscript<C>,
 
     // Powers of a challenge y for taking a random linear-combination of all constraints.
@@ -63,7 +63,7 @@ impl<C: CurveAffine> Accumulator<C> {
         pk: &ProvingKey<C>,
         instance_transcript: InstanceTranscript<C>,
         advice_transcript: AdviceTranscript<C>,
-        lookup_transcript: Option<LookupTranscipt<C>>,
+        lookup_transcript: LookupTranscipt<C>,
         compressed_verifier_transcript: CompressedVerifierTranscript<C>,
         y: C::Scalar,
     ) -> Self {
@@ -116,7 +116,7 @@ impl<C: CurveAffine> Accumulator<C> {
             .iter()
             .map(|polys| polys.len())
             .collect();
-        let num_constraints = num_constraints_per_gate.iter().sum();
+        let num_constraints: usize = num_constraints_per_gate.iter().sum();
 
         /*
         For each gate at index `gate_idx` with polynomials G₀, …, Gₘ₋₁ and degrees d₀, …, dₘ₋₁,
@@ -522,11 +522,7 @@ impl<C: CurveAffine> Accumulator<C> {
         self.instance_transcript
             .challenges_iter()
             .chain(self.advice_transcript.challenges_iter())
-            .chain(
-                self.lookup_transcript
-                    .iter()
-                    .flat_map(|lookup_transcript| lookup_transcript.challenges_iter()),
-            )
+            .chain(self.lookup_transcript.challenges_iter())
             .chain(self.compressed_verifier_transcript.challenges_iter())
             .chain(self.ys.iter())
     }
@@ -535,11 +531,7 @@ impl<C: CurveAffine> Accumulator<C> {
         self.instance_transcript
             .challenges_iter_mut()
             .chain(self.advice_transcript.challenges_iter_mut())
-            .chain(
-                self.lookup_transcript
-                    .iter_mut()
-                    .flat_map(|lookup_transcript| lookup_transcript.challenges_iter_mut()),
-            )
+            .chain(self.lookup_transcript.challenges_iter_mut())
             .chain(self.compressed_verifier_transcript.challenges_iter_mut())
             .chain(self.ys.iter_mut())
     }
@@ -548,11 +540,7 @@ impl<C: CurveAffine> Accumulator<C> {
         self.instance_transcript
             .polynomials_iter()
             .chain(self.advice_transcript.polynomials_iter())
-            .chain(
-                self.lookup_transcript
-                    .iter()
-                    .flat_map(|lookup_transcript| lookup_transcript.polynomials_iter()),
-            )
+            .chain(self.lookup_transcript.polynomials_iter())
             .chain(self.compressed_verifier_transcript.polynomials_iter())
     }
 
@@ -562,11 +550,7 @@ impl<C: CurveAffine> Accumulator<C> {
         self.instance_transcript
             .polynomials_iter_mut()
             .chain(self.advice_transcript.polynomials_iter_mut())
-            .chain(
-                self.lookup_transcript
-                    .iter_mut()
-                    .flat_map(|lookup_transcript| lookup_transcript.polynomials_iter_mut()),
-            )
+            .chain(self.lookup_transcript.polynomials_iter_mut())
             .chain(self.compressed_verifier_transcript.polynomials_iter_mut())
     }
 
@@ -574,11 +558,7 @@ impl<C: CurveAffine> Accumulator<C> {
         self.instance_transcript
             .commitments_iter()
             .chain(self.advice_transcript.commitments_iter())
-            .chain(
-                self.lookup_transcript
-                    .iter()
-                    .flat_map(|lookup_transcript| lookup_transcript.commitments_iter()),
-            )
+            .chain(self.lookup_transcript.commitments_iter())
             .chain(self.compressed_verifier_transcript.commitments_iter())
     }
 
@@ -586,11 +566,7 @@ impl<C: CurveAffine> Accumulator<C> {
         self.instance_transcript
             .commitments_iter_mut()
             .chain(self.advice_transcript.commitments_iter_mut())
-            .chain(
-                self.lookup_transcript
-                    .iter_mut()
-                    .flat_map(|lookup_transcript| lookup_transcript.commitments_iter_mut()),
-            )
+            .chain(self.lookup_transcript.commitments_iter_mut())
             .chain(self.compressed_verifier_transcript.commitments_iter_mut())
     }
 
@@ -598,11 +574,7 @@ impl<C: CurveAffine> Accumulator<C> {
         self.instance_transcript
             .blinds_iter()
             .chain(self.advice_transcript.blinds_iter())
-            .chain(
-                self.lookup_transcript
-                    .iter()
-                    .flat_map(|lookup_transcript| lookup_transcript.blinds_iter()),
-            )
+            .chain(self.lookup_transcript.blinds_iter())
             .chain(self.compressed_verifier_transcript.blinds_iter())
     }
 
@@ -610,11 +582,7 @@ impl<C: CurveAffine> Accumulator<C> {
         self.instance_transcript
             .blinds_iter_mut()
             .chain(self.advice_transcript.blinds_iter_mut())
-            .chain(
-                self.lookup_transcript
-                    .iter_mut()
-                    .flat_map(|lookup_transcript| lookup_transcript.blinds_iter_mut()),
-            )
+            .chain(self.lookup_transcript.blinds_iter_mut())
             .chain(self.compressed_verifier_transcript.blinds_iter_mut())
     }
 }
