@@ -281,7 +281,8 @@ impl<C: CurveAffine> ProvingKey<C> {
         self.folding_constraints
             .iter()
             .map(|polys| polys.len())
-            .sum()
+            .sum::<usize>()
+            + 2 * self.cs.lookups.len()
     }
 }
 

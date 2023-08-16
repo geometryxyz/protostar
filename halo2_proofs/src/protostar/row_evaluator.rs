@@ -174,7 +174,7 @@ pub fn boolean_evaluations<F: Field>(eval0: F, eval1: F, num_evals: usize) -> Ve
 
     let diff = eval1 - eval0;
 
-    result[0] = eval1;
+    result[0] = eval0;
     result[1] = eval1;
     for i in 2..num_evals {
         result[i] = result[i - 1] + diff;
@@ -214,4 +214,39 @@ pub fn boolean_evaluations_vec<F: Field>(
         }
     }
     result
+}
+
+pub struct PolyBooleanEvaluator<'a, F: Field> {
+    poly_0: &'a Polynomial<F, LagrangeCoeff>,
+    poly_1: &'a Polynomial<F, LagrangeCoeff>,
+    evals: Vec<F>,
+}
+
+impl<'a, F: Field> PolyBooleanEvaluator<'a, F> {
+    pub fn new(
+        poly_0: &'a Polynomial<F, LagrangeCoeff>,
+        poly_1: &'a Polynomial<F, LagrangeCoeff>,
+        num_evals: usize,
+    ) -> Self {
+        debug_assert!(2 <= num_evals);
+        Self {
+            poly_0,
+            poly_1,
+            evals: vec![F::ZERO; num_evals],
+        }
+    }
+
+    pub fn evaluate(&mut self, row_idx: usize) -> &[F] {
+        let num_evals = self.evals.len();
+        self.evals[0] = self.poly_0[row_idx];
+        self.evals[1] = self.poly_1[row_idx];
+
+        let diff = self.evals[1] - self.evals[0];
+
+        for eval_idx in 2..num_evals {
+            self.evals[eval_idx] = self.evals[eval_idx - 1] + diff;
+        }
+
+        &self.evals
+    }
 }

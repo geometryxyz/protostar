@@ -20,7 +20,7 @@ use crate::{
         commitment::{Blind, Params},
         empty_lagrange, lagrange_from_vec, LagrangeCoeff, Polynomial,
     },
-    protostar::{error_check, keygen::ProvingKey, row_evaluator::RowEvaluator},
+    protostar::{keygen::ProvingKey, row_evaluator::RowEvaluator},
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
@@ -344,7 +344,6 @@ fn build_m_poly<F: PrimeField>(
 ) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
     let mut lookup_evaluator = RowEvaluator::new(lookup_expressions, challenges);
 
-    let mut row_evals = vec![F::ZERO; lookup_expressions.len()];
     let mut row_evals_repr: Vec<u8> = Vec::new();
 
     let mut m_poly = empty_lagrange(num_rows);
@@ -377,8 +376,6 @@ fn build_g_poly<F: PrimeField>(
 ) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
     let mut lookup_evaluator = RowEvaluator::new(lookup_expressions, challenges);
 
-    let mut row_evals = vec![F::ZERO; lookup_expressions.len()];
-
     let mut g_poly = empty_lagrange(num_rows);
 
     for row_idx in 0..num_rows {
@@ -403,8 +400,6 @@ fn build_h_poly<F: PrimeField>(
     r: F,
 ) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
     let mut table_evaluator = RowEvaluator::new(table_expressions, challenges);
-
-    let mut row_evals = vec![F::ZERO; table_expressions.len()];
 
     let mut h_poly = empty_lagrange(num_rows);
 

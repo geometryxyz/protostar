@@ -1,4 +1,3 @@
-use core::num;
 use std::{
     collections::BTreeMap,
     iter::zip,
@@ -14,11 +13,17 @@ use rayon::prelude::{
 
 use crate::{
     arithmetic::{field_integers, parallelize, powers},
+    plonk::{self, lookup::Argument, Expression},
     poly::{
         commitment::{Blind, Params},
         LagrangeCoeff, Polynomial,
     },
-    protostar::row_evaluator::{boolean_evaluations, RowBooleanEvaluator},
+    protostar::{
+        error_check::lookup::{error_poly_lookup_inputs, error_poly_lookup_tables},
+        row_evaluator::{
+            boolean_evaluations, boolean_evaluations_vec, PolyBooleanEvaluator, RowBooleanEvaluator,
+        },
+    },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
@@ -30,6 +35,8 @@ use super::{
         instance::InstanceTranscript, lookup::LookupTranscipt,
     },
 };
+
+mod lookup;
 
 /// Each constraint error polynomial must be multiplied by the challenge(s) beta.
 /// This allows us to compute the degree and therefore number of evaluations of e(X).
@@ -96,6 +103,7 @@ impl<C: CurveAffine> Accumulator<C> {
         new: Accumulator<C>,
         transcript: &mut T,
     ) {
+        let num_rows = pk.num_usable_rows();
         /*
         Constraints are grouped by gate. Most constraint groups will have a common simple selector which
         selects whether the constraints are active. We can skip the evaluation of the entire group by first checking
@@ -202,11 +210,19 @@ impl<C: CurveAffine> Accumulator<C> {
             })
             .collect();
 
-        for row_idx in 0..pk.num_usable_rows() {
+        /*
+        Create an evaluator for the beta polynomial.
+        TODO(@adr1anh): investigate whether we should precompute them all and cache the results.
+        */
+        let mut beta_ev =
+            PolyBooleanEvaluator::new(self.beta_poly(), new.beta_poly(), max_num_evals);
+
+        /*
+        TODO(@adr1anh): Parallelize this loop.
+         */
+        for row_idx in 0..num_rows {
             // Get the next evaluation βᵢ(D) of βᵢ(X) = ((1-X)⋅acc.βᵢ + X⋅acc.βᵢ)
-            let beta_acc = self.compressed_verifier_transcript.beta_poly()[row_idx];
-            let beta_new = new.compressed_verifier_transcript.beta_poly()[row_idx];
-            let beta_poly_evals = boolean_evaluations(beta_acc, beta_new, max_num_evals);
+            let beta_poly_evals = beta_ev.evaluate(row_idx);
 
             for (gate_idx, num_gate_constraints) in num_constraints_per_gate.iter().enumerate() {
                 // Return early if the selector for the gate is off at this row.
@@ -225,10 +241,10 @@ impl<C: CurveAffine> Accumulator<C> {
                     row_idx,
                     &pk.selectors,
                     &pk.fixed,
-                    &self.instance_transcript.instance_polys,
-                    &new.instance_transcript.instance_polys,
-                    &self.advice_transcript.advice_polys,
-                    &new.advice_transcript.advice_polys,
+                    &self.instance_polys(),
+                    &new.instance_polys(),
+                    &self.advice_polys(),
+                    &new.advice_polys(),
                 );
 
                 // Get the running sums for [e₀(D₀), …, eₘ₋₁(Dₘ₋₁)] for the current gate
@@ -258,6 +274,61 @@ impl<C: CurveAffine> Accumulator<C> {
             }
         }
 
+        // Compute evaluations of error polynomials for the lookup constraints
+        let lookup_error_polys_evals: Vec<_> = pk
+            .cs()
+            .lookups
+            .iter()
+            .enumerate()
+            .flat_map(|(lookup_idx, lookup_arg)| {
+                let tx0 = &self.lookup_transcript.singles_transcript[lookup_idx];
+                let tx1 = &new.lookup_transcript.singles_transcript[lookup_idx];
+
+                // SAFETY: We can safely unwrap the challenges since they are Some whenever pk.cs().lookups() is non-empty
+
+                let inputs_error_poly_evals = error_poly_lookup_inputs(
+                    num_rows,
+                    &pk.selectors,
+                    &pk.fixed,
+                    [&self.advice_challenges(), &new.advice_challenges()],
+                    [&self.beta_poly(), &new.beta_poly()],
+                    [&self.advice_polys(), &new.advice_polys()],
+                    [&self.instance_polys(), &new.instance_polys()],
+                    lookup_arg.input_expressions(),
+                    [
+                        &self.lookup_transcript.r.unwrap(),
+                        &new.lookup_transcript.r.unwrap(),
+                    ],
+                    [
+                        &self.lookup_transcript.thetas.as_ref().unwrap(),
+                        &new.lookup_transcript.thetas.as_ref().unwrap(),
+                    ],
+                    [&tx0.g_poly, &tx1.g_poly],
+                );
+                let tables_error_poly_evals = error_poly_lookup_tables(
+                    num_rows,
+                    &pk.selectors,
+                    &pk.fixed,
+                    [&self.advice_challenges(), &new.advice_challenges()],
+                    [&self.beta_poly(), &new.beta_poly()],
+                    [&self.advice_polys(), &new.advice_polys()],
+                    [&self.instance_polys(), &new.instance_polys()],
+                    lookup_arg.table_expressions(),
+                    [
+                        &self.lookup_transcript.r.unwrap(),
+                        &new.lookup_transcript.r.unwrap(),
+                    ],
+                    [
+                        &self.lookup_transcript.thetas.as_ref().unwrap(),
+                        &new.lookup_transcript.thetas.as_ref().unwrap(),
+                    ],
+                    [&tx0.m_poly, &tx1.m_poly],
+                    [&tx0.h_poly, &tx1.h_poly],
+                );
+                [inputs_error_poly_evals, tables_error_poly_evals].into_iter()
+            })
+            .collect();
+
         /*
         Now that we have evaluated all gates, we no longer need to keep track of the nested structure.
         We flatten `gates_error_polys_evals` into `error_polys_evals`, and let `m = num_constraints`.
@@ -268,6 +339,7 @@ impl<C: CurveAffine> Accumulator<C> {
             let mut error_polys_evals: Vec<_> = gates_error_polys_evals
                 .into_iter()
                 .flat_map(|poly| poly.into_iter())
+                .chain(lookup_error_polys_evals.into_iter())
                 .collect();
 
             // Sanity checks
@@ -454,7 +526,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 // Create a RowEvaluator for each gate
                 let mut folding_gate_evs: Vec<_> = folding_constraints
                     .iter()
-                    .map(|polys| RowEvaluator::new(&polys, &self.advice_transcript.challenges))
+                    .map(|polys| RowEvaluator::new(&polys, &self.advice_challenges()))
                     .collect();
 
                 for (i, error) in errors.iter_mut().enumerate() {
@@ -476,8 +548,8 @@ impl<C: CurveAffine> Accumulator<C> {
                             row,
                             &pk.selectors,
                             &pk.fixed,
-                            &self.instance_transcript.instance_polys,
-                            &self.advice_transcript.advice_polys,
+                            &self.instance_polys(),
+                            &self.advice_polys(),
                         );
 
                         // Add ∑ⱼ yⱼ⋅Gⱼ(acc[i]) to eᵢ
@@ -485,7 +557,7 @@ impl<C: CurveAffine> Accumulator<C> {
                             .fold(C::Scalar::ZERO, |acc, (y, eval)| acc + *y * eval);
                     }
                     // eᵢ *= βᵢ⋅eᵢ
-                    *error *= self.compressed_verifier_transcript.beta_poly()[row];
+                    *error *= self.beta_poly()[row];
                 }
             });
 
@@ -504,7 +576,7 @@ impl<C: CurveAffine> Accumulator<C> {
 
                 // Create a single evaluator for all linear constraints
                 let mut linear_gate_ev =
-                    RowEvaluator::new(linear_constraints, &self.advice_transcript.challenges);
+                    RowEvaluator::new(linear_constraints, &self.advice_challenges());
 
                 for (i, error) in errors.iter_mut().enumerate() {
                     let row = start + i;
@@ -513,8 +585,8 @@ impl<C: CurveAffine> Accumulator<C> {
                         row,
                         &pk.selectors,
                         &pk.fixed,
-                        &self.instance_transcript.instance_polys,
-                        &self.advice_transcript.advice_polys,
+                        &self.instance_polys(),
+                        &self.advice_polys(),
                     );
 
                     // Check that all constraints evaluate to 0.
@@ -530,6 +602,22 @@ impl<C: CurveAffine> Accumulator<C> {
         // TODO(@adr1anh): Maybe check permutations too?
 
         commitments_ok & folding_errors_ok & linear_errors_ok
+    }
+
+    fn advice_challenges(&self) -> &[Vec<C::Scalar>] {
+        &self.advice_transcript.challenges
+    }
+
+    fn advice_polys(&self) -> &[Polynomial<C::Scalar, LagrangeCoeff>] {
+        &self.advice_transcript.advice_polys
+    }
+
+    fn instance_polys(&self) -> &[Polynomial<C::Scalar, LagrangeCoeff>] {
+        &self.instance_transcript.instance_polys
+    }
+
+    fn beta_poly(&self) -> &Polynomial<C::Scalar, LagrangeCoeff> {
+        &self.compressed_verifier_transcript.beta_poly()
     }
 
     pub fn challenges_iter(&self) -> impl Iterator<Item = &C::Scalar> {
