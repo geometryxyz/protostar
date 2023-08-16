@@ -33,8 +33,6 @@ pub struct LookupTranscipt<C: CurveAffine> {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LookupTranscriptSingle<C: CurveAffine> {
-    pub theta: C::Scalar,
-
     pub m_poly: Polynomial<C::Scalar, LagrangeCoeff>,
     pub m_commitment: C,
     pub m_blind: Blind<C::Scalar>,
@@ -112,7 +110,7 @@ pub(crate) fn create_lookup_transcript<
         .iter()
         .map(|m_poly| {
             let m_blind = Blind::new(&mut rng);
-            (params.commit_lagrange(&m_poly, m_blind.clone()), m_blind)
+            (params.commit_lagrange(&m_poly, m_blind), m_blind)
         })
         .unzip();
 
@@ -160,13 +158,13 @@ pub(crate) fn create_lookup_transcript<
         .iter()
         .map(|g_poly| {
             let g_blind = Blind::default();
-            (params.commit_lagrange(g_poly, g_blind.clone()), g_blind)
+            (params.commit_lagrange(g_poly, g_blind), g_blind)
         })
         .unzip();
 
     let mut g_commitments = vec![C::identity(); num_lookups];
     C::CurveExt::batch_normalize(&g_commitments_projective, &mut g_commitments);
-    // write commitment of g(X) to transcript
+    // write commitment of h_poly to transcript
     for g_commitment in g_commitments.iter() {
         let _ = transcript.write_point(*g_commitment);
     }
@@ -195,13 +193,13 @@ pub(crate) fn create_lookup_transcript<
         .iter()
         .map(|h_poly| {
             let h_blind = Blind::default();
-            (params.commit_lagrange(&h_poly, h_blind.clone()), h_blind)
+            (params.commit_lagrange(&h_poly, h_blind), h_blind)
         })
         .unzip();
 
     let mut h_commitments = vec![C::identity(); num_lookups];
     C::CurveExt::batch_normalize(&h_commitments_projective, &mut h_commitments);
-    // write commitment of g(X) to transcript
+    // write commitment of h_poly to transcript
     for h_commitment in h_commitments.iter() {
         let _ = transcript.write_point(*h_commitment);
     }
@@ -247,14 +245,14 @@ impl<C: CurveAffine> LookupTranscipt<C> {
         self.thetas
             .iter()
             .flat_map(|c| c.iter())
-            .chain(self.r.iter().flat_map(|c| std::iter::once(c)))
+            .chain(self.r.iter().flat_map(std::iter::once))
     }
 
     pub fn challenges_iter_mut(&mut self) -> impl Iterator<Item = &mut C::Scalar> {
         self.thetas
             .iter_mut()
             .flat_map(|c| c.iter_mut())
-            .chain(self.r.iter_mut().flat_map(|c| std::iter::once(c)))
+            .chain(self.r.iter_mut().flat_map(std::iter::once))
     }
 
     pub fn polynomials_iter(&self) -> impl Iterator<Item = &Polynomial<C::Scalar, LagrangeCoeff>> {
