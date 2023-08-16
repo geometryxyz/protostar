@@ -20,7 +20,7 @@ use crate::{
         commitment::{Blind, Params},
         empty_lagrange, lagrange_from_vec, LagrangeCoeff, Polynomial,
     },
-    protostar::{error_check, keygen::ProvingKey},
+    protostar::{error_check, keygen::ProvingKey, row_evaluator::RowEvaluator},
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
@@ -317,23 +317,14 @@ fn build_lookup_index_table<F: PrimeField>(
     instance: &[Polynomial<F, LagrangeCoeff>],
     advice: &[Polynomial<F, LagrangeCoeff>],
 ) -> HashMap<Vec<u8>, usize> {
-    let mut table_evaluator =
-        error_check::gate::GateEvaluator::new_single(table_expressions, challenges);
+    let mut table_evaluator = RowEvaluator::new(table_expressions, challenges);
 
     let mut map: HashMap<Vec<u8>, usize> = HashMap::new();
 
-    let mut row_evals = vec![F::ZERO; table_expressions.len()];
     let mut row_evals_repr: Vec<u8> = Vec::new();
 
     for row_idx in 0..num_rows {
-        table_evaluator.evaluate_single(
-            &mut row_evals,
-            row_idx,
-            selectors,
-            fixed,
-            instance,
-            advice,
-        );
+        let row_evals = table_evaluator.evaluate(row_idx, selectors, fixed, instance, advice);
         row_evals_repr.clear();
         for e in row_evals.iter() {
             row_evals_repr.extend(e.to_repr().as_ref().iter());
@@ -353,8 +344,7 @@ fn build_m_poly<F: PrimeField>(
     instance: &[Polynomial<F, LagrangeCoeff>],
     advice: &[Polynomial<F, LagrangeCoeff>],
 ) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
-    let mut lookup_evaluator =
-        error_check::gate::GateEvaluator::new_single(lookup_expressions, challenges);
+    let mut lookup_evaluator = RowEvaluator::new(lookup_expressions, challenges);
 
     let mut row_evals = vec![F::ZERO; lookup_expressions.len()];
     let mut row_evals_repr: Vec<u8> = Vec::new();
@@ -362,14 +352,7 @@ fn build_m_poly<F: PrimeField>(
     let mut m_poly = empty_lagrange(num_rows);
 
     for row_idx in 0..num_rows {
-        lookup_evaluator.evaluate_single(
-            &mut row_evals,
-            row_idx,
-            selectors,
-            fixed,
-            instance,
-            advice,
-        );
+        let row_evals = lookup_evaluator.evaluate(row_idx, selectors, fixed, instance, advice);
         row_evals_repr.clear();
         for e in row_evals.iter() {
             row_evals_repr.extend(e.to_repr().as_ref().iter());
@@ -394,22 +377,14 @@ fn build_g_poly<F: PrimeField>(
     thetas: &[F],
     r: F,
 ) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
-    let mut lookup_evaluator =
-        error_check::gate::GateEvaluator::new_single(lookup_expressions, challenges);
+    let mut lookup_evaluator = RowEvaluator::new(lookup_expressions, challenges);
 
     let mut row_evals = vec![F::ZERO; lookup_expressions.len()];
 
     let mut g_poly = empty_lagrange(num_rows);
 
     for row_idx in 0..num_rows {
-        lookup_evaluator.evaluate_single(
-            &mut row_evals,
-            row_idx,
-            selectors,
-            fixed,
-            instance,
-            advice,
-        );
+        let row_evals = lookup_evaluator.evaluate(row_idx, selectors, fixed, instance, advice);
         g_poly[row_idx] =
             zip(row_evals.iter(), thetas.iter()).fold(r, |acc, (eval, theta)| acc + *eval * theta);
     }
@@ -429,22 +404,14 @@ fn build_h_poly<F: PrimeField>(
     thetas: &[F],
     r: F,
 ) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
-    let mut table_evaluator =
-        error_check::gate::GateEvaluator::new_single(table_expressions, challenges);
+    let mut table_evaluator = RowEvaluator::new(table_expressions, challenges);
 
     let mut row_evals = vec![F::ZERO; table_expressions.len()];
 
     let mut h_poly = empty_lagrange(num_rows);
 
     for row_idx in 0..num_rows {
-        table_evaluator.evaluate_single(
-            &mut row_evals,
-            row_idx,
-            selectors,
-            fixed,
-            instance,
-            advice,
-        );
+        let row_evals = table_evaluator.evaluate(row_idx, selectors, fixed, instance, advice);
         h_poly[row_idx] =
             zip(row_evals.iter(), thetas.iter()).fold(r, |acc, (eval, theta)| acc + *eval * theta);
     }

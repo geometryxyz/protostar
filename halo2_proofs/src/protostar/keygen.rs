@@ -272,16 +272,16 @@ impl<C: CurveAffine> ProvingKey<C> {
     }
 
     /// Total number of linearly-independent constraints, whose degrees are larger than 1
+    pub fn folding_constraints_selectors(&self) -> &[Option<Selector>] {
+        &self.simple_selectors
+    }
+
+    /// Total number of linearly-independent constraints, whose degrees are larger than 1
     pub fn num_folding_constraints(&self) -> usize {
         self.folding_constraints
             .iter()
             .map(|polys| polys.len())
             .sum()
-    }
-
-    /// Total number of linearly-independent constraints, whose degrees are larger than 1
-    pub fn simple_selectors(&self) -> &[Option<Selector>] {
-        &self.simple_selectors
     }
 }
 

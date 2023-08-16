@@ -3,6 +3,7 @@
 mod error_check;
 mod keygen;
 pub mod prover;
+mod row_evaluator;
 mod transcript;
 
 pub use error_check::Accumulator;
