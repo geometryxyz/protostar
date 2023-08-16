@@ -46,19 +46,18 @@ pub struct Accumulator<C: CurveAffine> {
     lookup_transcript: LookupTranscipt<C>,
     compressed_verifier_transcript: CompressedVerifierTranscript<C>,
 
-    // Powers of a challenge y for taking a random linear-combination of all constraints.
+    /// Powers of a challenge y for taking a random linear-combination of all constraints.
     ys: Vec<C::Scalar>,
-
-    // For each constraint of degree > 1, we cache its error polynomial evaluation here
-    // so we can interpolate all of them individually.
+    /// For each constraint of degree > 1, we cache its error polynomial evaluation here
+    /// so we can interpolate all of them individually.
     constraint_errors: Vec<C::Scalar>,
 
-    // Error value for all constraints
+    /// Error value for all constraints
     error: C::Scalar,
 }
 
 impl<C: CurveAffine> Accumulator<C> {
-    // Create a new `Accumulator` from the different transcripts.
+    /// Create a new `Accumulator` from the different transcripts.
     pub fn new(
         pk: &ProvingKey<C>,
         instance_transcript: InstanceTranscript<C>,
@@ -95,138 +94,53 @@ impl<C: CurveAffine> Accumulator<C> {
         new: Accumulator<C>,
         transcript: &mut T,
     ) {
-        /*
-        Constraints are grouped by gate. Most constraint groups will have a common simple selector which
-        selects whether the constraints are active. We can skip the evaluation of the entire group by first checking
-        whether the selector is switched off.
+        let mut info = FoldingConstraintInfo::<C>::new(
+            &pk,
+            &self.advice_transcript.challenges,
+            &new.advice_transcript.challenges,
+        );
+        let mut gates_evals =
+            GatesErrorPolyEvaluations::<C>::new(&info.gates_error_polys_num_evals);
 
-        The constraints in one gate will all be applied to the same subset of columns,
-        so we only fetch the entries in the row for the columns of the active constraints.
-        We index the gates by `gate_idx` and the constraints in gate `gate_idx` by `gate_constraint_idx`.
-        After evaluating all error polynomials for each gate, we consider the flattened list of constraints,
-        and index them by `constraint_idx`
-        */
-        let gate_selectors = &pk.simple_selectors;
-
-        /*
-        Compute the number of constraints in each gate as well as the total number of constraints in all gates.
-        */
-        let num_constraints_per_gate: Vec<_> = pk
-            .folding_constraints
-            .iter()
-            .map(|polys| polys.len())
-            .collect();
-        let num_constraints: usize = num_constraints_per_gate.iter().sum();
-
-        /*
-        For each gate at index `gate_idx` with polynomials G₀, …, Gₘ₋₁ and degrees d₀, …, dₘ₋₁,
-        we evaluate at each row i the polynomials e₀,ᵢ(X), …, eₘ₋₁,ᵢ(X), where
-            eⱼ,ᵢ(X) = βᵢ(X)⋅Gⱼ((1−X)⋅acc[i] + X⋅new[i]),
-        where we use the shorthand notation `acc[i]` and `new[i]` to denote the row-vector of values from the
-        accumulators `acc` and `new` respectively.
-
-        Each eⱼ,ᵢ(X) has degree dⱼ + `BETA_POLY_DEGREE`, so we need (dⱼ + `BETA_POLY_DEGREE` + 1) evaluations in order to
-        interpolate the full polynomial.
-        */
-        let gates_error_polys_num_evals: Vec<Vec<usize>> = pk
-            .folding_constraints
-            .iter()
-            .map(|polys| {
-                polys
-                    .iter()
-                    .map(|poly| poly.folding_degree() + BETA_POLY_DEGREE + 1)
-                    .collect()
-            })
-            .collect();
-
-        /*
-        For each gate, we allocate a buffer for storing running sum of the evaluation e₀(X), …, eₘ₋₁(X).
-        The polynomial eⱼ(X) is given by
-            eⱼ(X) = ∑ᵢ eⱼ,ᵢ(X)
-
-        For each polynomial eⱼ(X), we define its evaluation domain as Dⱼ = {0, 1, …, dⱼ + BETA_POLY_DEGREE + 1},
-        and we denote by eⱼ(Dⱼ) = { p(i) | i ∈ Dⱼ } the list of evaluations of eⱼ(X) over Dⱼ.
-
-        Therefore, for each gate, `gates_error_polys_evals[gate_idx]` corresponds to the list
-            [e₀(D₀), …, eₘ₋₁(Dₘ₋₁)]
-
-        As an optimization, we observe that we can store in the accumulators the evaluations
-            [e₀(0), …, eₘ₋₁(0)] in `acc`, and
-            [e₀(1), …, eₘ₋₁(1)] in `new`
-        Therefore, we only actually evaluate the polynomials on the restricted sets Dⱼ' = Dⱼ \ {0,1}.
-        */
-        let mut gates_error_polys_evals: Vec<Vec<_>> = gates_error_polys_num_evals
-            .iter()
-            .map(|error_polys_num_evals| {
-                error_polys_num_evals
-                    .iter()
-                    .map(|num_evals| vec![C::Scalar::ZERO; *num_evals])
-                    .collect()
-            })
-            .collect();
-
-        /*
-        For gate at index `gate_idx` and each row i of the accumulator, we temporarily store the list of evaluations
-            [e₀,ᵢ(D₀), …, eₘ₋₁,ᵢ(Dₘ₋₁)]
-        in `row_gates_error_polys_evals[gate_idx]`
-        */
-        let mut row_gates_error_polys_evals = gates_error_polys_evals.clone();
-
-        /*
-        Compute the maximum number of evaluations over all error polynomials over all gates.
-        This defines the maximal evaluation domain D = {0, 1, …, dₘₐₓ + BETA_POLY_DEGREE + 1}
-        This will allow us to compute the evaluations βᵢ(D)
-        */
-        let max_num_evals = *gates_error_polys_num_evals
-            .iter()
-            .flat_map(|gates_num_evals| gates_num_evals.iter())
-            .max()
-            .unwrap();
-
-        /*
-        A `GateEvaluator` pre-processes a gate's polynomials for more efficient evaluation.
-        In particular, it collects all column queries and allocates buffers where the corresponding
-        values can be stored. Each polynomial in the gate is evaluated several times,
-        so it is advantageous to only fetch the values from the columns once.
-         */
-        let mut gate_evs: Vec<_> = pk
-            .folding_constraints
-            .iter()
-            .zip(gates_error_polys_num_evals.iter())
-            .map(|(polys, num_evals)| {
-                let max_num_evals = num_evals.iter().max().unwrap();
-                GateEvaluator::new(
-                    polys,
-                    &self.advice_transcript.challenges,
-                    &new.advice_transcript.challenges,
-                    *max_num_evals,
-                )
-            })
-            .collect();
+        // note(tk): dropped the unnecessary clone, may want to move or change this comment block
+        // For gate at index `gate_idx` and each row i of the accumulator, we temporarily store the list of evaluations
+        //     [e₀,ᵢ(D₀), …, eₘ₋₁,ᵢ(Dₘ₋₁)]
+        // in `row_gates_error_polys_evals[gate_idx]`
 
         for row_idx in 0..pk.num_usable_rows() {
             // Get the next evaluation βᵢ(D) of βᵢ(X) = ((1-X)⋅acc.βᵢ + X⋅acc.βᵢ)
-            let beta_acc = self.compressed_verifier_transcript.beta_poly()[row_idx];
-            let beta_new = new.compressed_verifier_transcript.beta_poly()[row_idx];
-            let beta_poly_evals: Vec<_> = boolean_evaluations(beta_acc, beta_new)
-                .take(max_num_evals)
-                .collect();
+            let beta_poly_evals: Vec<_> = {
+                let beta_acc = self.compressed_verifier_transcript.beta_poly()[row_idx];
+                let beta_new = new.compressed_verifier_transcript.beta_poly()[row_idx];
+                boolean_evaluations(beta_acc, beta_new)
+                    .take(info.max_num_evals)
+                    .collect()
+            };
 
-            for (gate_idx, num_gate_constraints) in num_constraints_per_gate.iter().enumerate() {
+            for (gate_idx, num_gate_constraints) in info.num_constraints_per_gate.iter().enumerate()
+            {
                 // Return early if the selector for the gate is off at this row.
-                if let Some(selector) = gate_selectors[gate_idx] {
+                // Constraints are grouped by gate. Most constraint groups will have a common simple selector which
+                // selects whether the constraints are active. We can skip the evaluation of the entire group by first checking
+                // whether the selector is switched off.
+
+                // The constraints in one gate will all be applied to the same subset of columns,
+                // so we only fetch the entries in the row for the columns of the active constraints.
+                // We index the gates by `gate_idx` and the constraints in gate `gate_idx` by `gate_constraint_idx`.
+                // After evaluating all error polynomials for each gate, we consider the flattened list of constraints,
+                // and index them by `constraint_idx`
+                if let Some(selector) = &pk.simple_selectors[gate_idx] {
                     if !pk.selectors[selector.index()][row_idx] {
                         continue;
                     }
                 }
-                let gate_ev = &mut gate_evs[gate_idx];
 
+                let gate_evaluator = &mut info.gate_evaluators[gate_idx];
+                let row_eval = &mut gates_evals.row_evals[gate_idx];
                 // Evaluate [e₀,ᵢ(D₀), …, eₘ₋₁,ᵢ(Dₘ₋₁)] into `row_error_polys_evals`
-                //
                 // As an optimization, we skip the evaluations at X ∈ {0,1}
-                let row_error_polys_evals = &mut row_gates_error_polys_evals[gate_idx];
-                gate_ev.evaluate_all_from(
-                    row_error_polys_evals,
+                gate_evaluator.evaluate_all_from(
+                    row_eval,
                     STARTING_EVAL_IDX,
                     row_idx,
                     &pk.selectors,
@@ -239,12 +153,12 @@ impl<C: CurveAffine> Accumulator<C> {
 
                 // Get the running sums for [e₀(D₀), …, eₘ₋₁(Dₘ₋₁)] for the current gate
                 // to which we want to add the row's error polynomials evaluations.
-                let error_polys_evals = &mut gates_error_polys_evals[gate_idx];
+                let error_polys_evals = &mut gates_evals.evals[gate_idx];
                 for j in 0..*num_gate_constraints {
                     // eⱼ(Dⱼ)
                     let error_poly_evals = &mut error_polys_evals[j];
                     // eⱼ,ᵢ(Dⱼ)
-                    let row_error_poly_evals = &row_error_polys_evals[j];
+                    let row_error_poly_evals = &row_eval[j];
 
                     /*
                     Update the gate error polynomial evaluations
@@ -253,6 +167,7 @@ impl<C: CurveAffine> Accumulator<C> {
                     NOTE: `beta_poly_evals` is most-likely longer than the other iterators,
                     but `zip` will only produce as many elements as the shortest of the iterators.
                     */
+                    // note(tk): could be written nicely with izip if we can use the itertools crate
                     for (error_poly_eval, (row_error_poly_eval, beta_eval)) in error_poly_evals
                         .iter_mut()
                         .zip(zip(row_error_poly_evals.iter(), beta_poly_evals.iter()))
@@ -271,15 +186,16 @@ impl<C: CurveAffine> Accumulator<C> {
         */
         let error_polys_evals: Vec<_> = {
             // First collect all gate error polynomial's evaluations e₀(D₀'), …, eₘ₋₁(Dₘ₋₁')
-            let mut error_polys_evals: Vec<_> = gates_error_polys_evals
+            let mut error_polys_evals: Vec<_> = gates_evals
+                .evals
                 .into_iter()
                 .flat_map(|poly| poly.into_iter())
                 .collect();
 
             // Sanity checks
-            debug_assert_eq!(error_polys_evals.len(), num_constraints);
-            debug_assert_eq!(self.constraint_errors.len(), num_constraints);
-            debug_assert_eq!(new.constraint_errors.len(), num_constraints);
+            debug_assert_eq!(error_polys_evals.len(), info.num_constraints_total);
+            debug_assert_eq!(self.constraint_errors.len(), info.num_constraints_total);
+            debug_assert_eq!(new.constraint_errors.len(), info.num_constraints_total);
 
             // Re-insert evaluations at X = 0, 1
             for (j, error_poly_evals) in error_polys_evals.iter_mut().enumerate() {
@@ -305,8 +221,8 @@ impl<C: CurveAffine> Accumulator<C> {
         */
         let final_error_poly_len = error_polys.iter().map(|poly| poly.len()).max().unwrap() + 1;
         let final_error_poly = {
-            debug_assert_eq!(self.ys.len(), num_constraints);
-            debug_assert_eq!(new.ys.len(), num_constraints);
+            debug_assert_eq!(self.ys.len(), info.num_constraints_total);
+            debug_assert_eq!(new.ys.len(), info.num_constraints_total);
             error_polys
                 .iter()
                 .enumerate()
@@ -439,7 +355,7 @@ impl<C: CurveAffine> Accumulator<C> {
         parallelize(&mut errors, |errors, start| {
             let ys = self.ys.clone();
 
-            let (mut folding_errors, mut folding_gate_evs): (Vec<_>, Vec<_>) = pk
+            let (mut folding_errors, mut folding_gate_evals): (Vec<_>, Vec<_>) = pk
                 .folding_constraints
                 .iter()
                 .map(|polys| {
@@ -471,7 +387,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 for (es, (selector, gate_ev)) in folding_errors.iter_mut().zip(
                     pk.simple_selectors
                         .iter()
-                        .zip(folding_gate_evs.iter_mut()),
+                        .zip(folding_gate_evals.iter_mut()),
                 ) {
                     if let Some(selector) = selector {
                         if !pk.selectors[selector.index()][row] {
@@ -515,7 +431,7 @@ impl<C: CurveAffine> Accumulator<C> {
 
         let error_ok = error == self.error;
 
-        commitments_ok & error_ok
+        commitments_ok && error_ok
     }
 
     pub fn challenges_iter(&self) -> impl Iterator<Item = &C::Scalar> {
@@ -707,12 +623,133 @@ fn quotient_by_boolean_vanishing<F: Field>(poly: &[F]) -> Vec<F> {
     quotient
 }
 
-/// Evaluate a polynomial `poly` given as list of coefficients.
+/// Evaluate a polynomial `poly` given as list of coefficients via Horner's Rule.
 fn evaluate_poly<F: Field>(poly: &[F], point: F) -> F {
-    let mut error = F::ZERO;
-    for coeff in poly.iter().rev() {
-        error *= point;
-        error += coeff;
+    // todo(tk): this was F::ZERO, but shouldn't this be F::ONE?
+    poly.iter().fold(F::ONE, |acc, coeff| acc * point + coeff)
+}
+
+pub(super) struct FoldingConstraintInfo<C: CurveAffine> {
+    /// The number of folding constraints in each gate in the proving key.
+    pub num_constraints_per_gate: Vec<usize>,
+    /// Total number of folding constraints in the proving key.
+    pub num_constraints_total: usize,
+    /// The number of evaluations of each error polynomial in each gate.
+    ///
+    /// For each gate at index `gate_idx` with polynomials G₀, …, Gₘ₋₁ and degrees d₀, …, dₘ₋₁,
+    /// we evaluate at each row i the polynomials e₀,ᵢ(X), …, eₘ₋₁,ᵢ(X), where
+    ///     eⱼ,ᵢ(X) = βᵢ(X)⋅Gⱼ((1−X)⋅acc[i] + X⋅new[i]),
+    /// where we use the shorthand notation `acc[i]` and `new[i]` to denote the row-vector of values from the
+    /// accumulators `acc` and `new` respectively.
+    ///
+    /// Each eⱼ,ᵢ(X) has degree dⱼ + `BETA_POLY_DEGREE`, so we need (dⱼ + `BETA_POLY_DEGREE` + 1) evaluations in order
+    /// to interpolate the full polynomial.
+    pub gates_error_polys_num_evals: Vec<Vec<usize>>,
+    /// Compute the maximum number of evaluations over all error polynomials over all gates.
+    /// This defines the maximal evaluation domain D = {0, 1, …, dₘₐₓ + BETA_POLY_DEGREE + 1}
+    /// This will allow us to compute the evaluations βᵢ(D)
+    pub max_num_evals: usize,
+    /// A `GateEvaluator` pre-processes a gate's polynomials for more efficient evaluation.
+    /// In particular, it collects all column queries and allocates buffers where the corresponding
+    /// values can be stored. Each polynomial in the gate is evaluated several times,
+    /// so it is advantageous to only fetch the values from the columns once.
+    pub gate_evaluators: Vec<GateEvaluator<C::ScalarExt>>,
+}
+
+impl<C: CurveAffine> FoldingConstraintInfo<C> {
+    fn new(
+        pk: &ProvingKey<C>,
+        advice_transcript_challenges_1: &[Vec<C::Scalar>],
+        advice_transcript_challenges_2: &[Vec<C::Scalar>],
+    ) -> Self {
+        let constraints_iter = pk.folding_constraints.iter();
+
+        let num_constraints_per_gate: Vec<usize> =
+            constraints_iter.clone().map(|polys| polys.len()).collect();
+        let num_constraints_total = num_constraints_per_gate.iter().sum();
+        let gates_error_polys_num_evals: Vec<Vec<usize>> = constraints_iter
+            .clone()
+            .map(|polys| {
+                polys
+                    .iter()
+                    .map(|poly| poly.folding_degree() + BETA_POLY_DEGREE + 1)
+                    .collect()
+            })
+            .collect();
+
+        let max_num_evals = *gates_error_polys_num_evals
+            .iter()
+            .flat_map(|gates_num_evals| gates_num_evals.iter())
+            .max()
+            .unwrap();
+
+        let gate_evaluators = constraints_iter
+            .zip(gates_error_polys_num_evals.iter())
+            .map(|(polys, num_evals)| {
+                let max_num_evals = num_evals.iter().max().unwrap();
+                GateEvaluator::new(
+                    polys,
+                    &advice_transcript_challenges_1,
+                    &advice_transcript_challenges_2,
+                    *max_num_evals,
+                )
+            })
+            .collect();
+
+        Self {
+            num_constraints_per_gate,
+            num_constraints_total,
+            gates_error_polys_num_evals,
+            max_num_evals,
+            gate_evaluators,
+        }
     }
-    error
+}
+
+/// For each gate, we allocate a buffer for storing running sum of the evaluation e₀(X), …, eₘ₋₁(X).
+/// The polynomial eⱼ(X) is given by
+///     eⱼ(X) = ∑ᵢ eⱼ,ᵢ(X)
+///
+/// For each polynomial eⱼ(X), we define its evaluation domain as Dⱼ = {0, 1, …, dⱼ + BETA_POLY_DEGREE + 1},
+/// and we denote by eⱼ(Dⱼ) = { p(i) | i ∈ Dⱼ } the list of evaluations of eⱼ(X) over Dⱼ.
+///
+/// Therefore, for each gate, `gates_error_polys_evals[gate_idx]` corresponds to the list
+///     [e₀(D₀), …, eₘ₋₁(Dₘ₋₁)]
+///
+/// As an optimization, we observe that we can store in the accumulators the evaluations
+///     [e₀(0), …, eₘ₋₁(0)] in `acc`, and
+///     [e₀(1), …, eₘ₋₁(1)] in `new`
+/// Therefore, we only actually evaluate the polynomials on the restricted sets Dⱼ' = Dⱼ \ {0,1}.
+///
+/// Separate from `FoldingConstraintInfo` because mutability.
+pub(super) type GatesPolysEvaluations<C: CurveAffine> =
+    Vec<Vec<Vec<<C as CurveAffine>::ScalarExt>>>;
+pub(super) struct GatesErrorPolyEvaluations<C: CurveAffine> {
+    pub evals: GatesPolysEvaluations<C>,
+    /// A clone of `evals` such that we may access the original values.
+    /// For gate at index `gate_idx` and each row i of the accumulator, we temporarily store the list of evaluations
+    ///     [e₀,ᵢ(D₀), …, eₘ₋₁,ᵢ(Dₘ₋₁)]
+    /// in `row_gates_error_polys_evals[gate_idx]`
+    // todo(tk): why do we need this?
+    pub row_evals: GatesPolysEvaluations<C>,
+}
+
+impl<C: CurveAffine> GatesErrorPolyEvaluations<C> {
+    pub fn new(evals: &[Vec<usize>]) -> Self {
+        let evals: Vec<_> = evals
+            .clone()
+            .iter()
+            .map(|error_polys_num_evals| {
+                error_polys_num_evals
+                    .iter()
+                    .map(|num_evals| vec![C::Scalar::ZERO; *num_evals])
+                    .collect()
+            })
+            .collect();
+
+        Self {
+            row_evals: evals.clone(),
+            evals,
+        }
+    }
 }
