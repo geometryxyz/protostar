@@ -68,13 +68,13 @@ impl<const W: usize> MyConfig<W> {
         meta.create_gate("z should start with 1", |_| {
             let one = Expression::Constant(F::ONE);
 
-            vec![q_first.expr() * ((one.clone() - z.cur()) * (one - z.cur()))]
+            vec![q_first.expr() * (one - z.cur())]
         });
 
         meta.create_gate("z should end with 1", |_| {
             let one = Expression::Constant(F::ONE);
 
-            vec![q_last.expr() * ((one.clone() - z.cur()) * (one - z.cur()))]
+            vec![q_last.expr() * (one - z.cur())]
         });
 
         meta.create_gate("z should have valid transition", |_| {
@@ -95,11 +95,7 @@ impl<const W: usize> MyConfig<W> {
                 .reduce(|acc, a| acc * theta.clone() + a)
                 .unwrap();
 
-            vec![
-                q_shuffle
-                    * (z.cur() * (original.clone() * original + gamma.clone())
-                        - z.next() * (shuffled.clone() * shuffled + gamma)),
-            ]
+            vec![q_shuffle * (z.cur() * (original + gamma.clone()) - z.next() * (shuffled + gamma))]
         });
 
         Self {
@@ -208,7 +204,7 @@ impl<F: Field, const W: usize, const H: usize> Circuit<F> for MyCircuit<F, W, H>
                                 compressed += value[idx];
                             }
 
-                            *product = compressed * compressed + gamma;
+                            *product = compressed + gamma;
                         }
 
                         product.iter_mut().batch_invert();
@@ -220,7 +216,7 @@ impl<F: Field, const W: usize, const H: usize> Circuit<F> for MyCircuit<F, W, H>
                                 compressed += value[idx];
                             }
 
-                            *product *= compressed * compressed + gamma;
+                            *product *= compressed + gamma;
                         }
 
                         #[allow(clippy::let_and_return)]
