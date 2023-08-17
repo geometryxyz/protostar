@@ -112,7 +112,7 @@ pub(crate) fn create_lookup_transcript<
         .iter()
         .map(|m_poly| {
             let m_blind = Blind::new(&mut rng);
-            (params.commit_lagrange(&m_poly, m_blind.clone()), m_blind)
+            (params.commit_lagrange(&m_poly, m_blind), m_blind)
         })
         .unzip();
 
@@ -160,7 +160,7 @@ pub(crate) fn create_lookup_transcript<
         .iter()
         .map(|g_poly| {
             let g_blind = Blind::default();
-            (params.commit_lagrange(g_poly, g_blind.clone()), g_blind)
+            (params.commit_lagrange(g_poly, g_blind), g_blind)
         })
         .unzip();
 
@@ -195,7 +195,7 @@ pub(crate) fn create_lookup_transcript<
         .iter()
         .map(|h_poly| {
             let h_blind = Blind::default();
-            (params.commit_lagrange(&h_poly, h_blind.clone()), h_blind)
+            (params.commit_lagrange(&h_poly, h_blind), h_blind)
         })
         .unzip();
 
@@ -247,14 +247,14 @@ impl<C: CurveAffine> LookupTranscipt<C> {
         self.thetas
             .iter()
             .flat_map(|c| c.iter())
-            .chain(self.r.iter().flat_map(|c| std::iter::once(c)))
+            .chain(self.r.iter().flat_map(std::iter::once))
     }
 
     pub fn challenges_iter_mut(&mut self) -> impl Iterator<Item = &mut C::Scalar> {
         self.thetas
             .iter_mut()
             .flat_map(|c| c.iter_mut())
-            .chain(self.r.iter_mut().flat_map(|c| std::iter::once(c)))
+            .chain(self.r.iter_mut().flat_map(std::iter::once))
     }
 
     pub fn polynomials_iter(&self) -> impl Iterator<Item = &Polynomial<C::Scalar, LagrangeCoeff>> {
