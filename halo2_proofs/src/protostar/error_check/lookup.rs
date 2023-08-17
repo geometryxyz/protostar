@@ -142,6 +142,11 @@ pub fn error_poly_lookup_tables<F: Field>(
         .collect();
 
     for row_idx in 0..num_rows {
+        // Early exit if mᵢ(D) == 0
+        if m[0][row_idx].is_zero_vartime() & m[1][row_idx].is_zero_vartime() {
+            continue;
+        }
+
         let beta_evals = beta_ev.evaluate(row_idx);
         let m_evals = m_ev.evaluate(row_idx);
         let h_evals = h_ev.evaluate(row_idx);

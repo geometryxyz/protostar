@@ -404,6 +404,10 @@ fn build_h_poly<F: PrimeField>(
     let mut h_poly = empty_lagrange(num_rows);
 
     for row_idx in 0..num_rows {
+        // Skip evaluation if mᵢ = 0
+        if m_poly[row_idx].is_zero_vartime() {
+            continue;
+        }
         let row_evals = table_evaluator.evaluate(row_idx, selectors, fixed, instance, advice);
         h_poly[row_idx] =
             zip(row_evals.iter(), thetas.iter()).fold(r, |acc, (eval, theta)| acc + *eval * theta);
