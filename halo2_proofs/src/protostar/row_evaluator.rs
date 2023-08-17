@@ -8,14 +8,18 @@ use crate::{
     poly::{LagrangeCoeff, Polynomial},
 };
 
-use self::{queried_expression::QueriedExpression, queries::Queries, row::Row};
+use self::{
+    evaluated_poly::EvaluatedFrom2, queried_expression::QueriedExpression, queries::Queries,
+    row::Row,
+};
 
+pub(crate) mod evaluated_poly;
+pub(crate) mod interpolate;
 mod queried_expression;
 mod queries;
 mod row;
 
 /// Structure for efficiently evaluating a set of polynomials over many rows.
-///
 pub struct RowBooleanEvaluator<F: Field> {
     // Boolean evaluations of queried challenges
     challenges_evals: Vec<Vec<F>>,
@@ -27,7 +31,7 @@ pub struct RowBooleanEvaluator<F: Field> {
 
     // Buffer for storing and returning the evaluations of all polynomials
     // in the values stored in `row`.
-    polys_evals_buffer: Vec<Vec<F>>,
+    polys_evals_buffer: Vec<EvaluatedFrom2<F>>,
 }
 
 impl<F: Field> RowBooleanEvaluator<F> {
@@ -38,7 +42,7 @@ impl<F: Field> RowBooleanEvaluator<F> {
         polys: &[Expression<F>],
         challenges_acc: &[Vec<F>],
         challenges_new: &[Vec<F>],
-        polys_evals_buffer: Vec<Vec<F>>,
+        polys_evals_buffer: Vec<EvaluatedFrom2<F>>,
     ) -> Self {
         debug_assert_eq!(polys.len(), polys_evals_buffer.len());
         let queries = Queries::from_polys(&polys);
@@ -51,7 +55,7 @@ impl<F: Field> RowBooleanEvaluator<F> {
         // Compute the maximum
         let max_num_evals = polys_evals_buffer
             .iter()
-            .map(|poly_evals| poly_evals.len())
+            .map(|poly_evals| poly_evals.num_evals())
             .max()
             .unwrap();
 
@@ -73,36 +77,25 @@ impl<F: Field> RowBooleanEvaluator<F> {
         }
     }
 
-    /// Evaluates all polynomials in the gate, at X = `from_eval_idx`, ...,
-    /// The total number of evaluations is defined by the legth of each list in
-    /// `error_polys_evals`.
-    /// That is, the polynomial constraint Gⱼ will have its evaluations stored in
-    /// `error_polys_evals[j]`.
-    pub fn evaluate_all_from(
+    /// Evaluates all polynomials at X = 2, 3, ..., returning the evaluations as a slice.
+    pub fn evaluate_all_from_2(
         &mut self,
-        from_eval_idx: usize,
         row_idx: usize,
         selectors: &[Vec<bool>],
         fixed: &[Polynomial<F, LagrangeCoeff>],
-        instance_acc: &[Polynomial<F, LagrangeCoeff>],
-        instance_new: &[Polynomial<F, LagrangeCoeff>],
-        advice_acc: &[Polynomial<F, LagrangeCoeff>],
-        advice_new: &[Polynomial<F, LagrangeCoeff>],
-    ) -> &[Vec<F>] {
-        self.row.populate_all_evaluated(
-            row_idx,
-            selectors,
-            fixed,
-            instance_acc,
-            instance_new,
-            advice_acc,
-            advice_new,
-        );
+        instance: [&[Polynomial<F, LagrangeCoeff>]; 2],
+        advice: [&[Polynomial<F, LagrangeCoeff>]; 2],
+    ) -> &[EvaluatedFrom2<F>] {
+        self.row
+            .populate_all_evaluated(row_idx, selectors, fixed, instance, advice);
 
         for (poly_idx, poly) in self.queried_polys.iter().enumerate() {
             let poly_evals = &mut self.polys_evals_buffer[poly_idx];
 
-            for (eval_idx, poly_eval) in poly_evals.iter_mut().enumerate().skip(from_eval_idx) {
+            for (eval_idx, poly_eval) in poly_evals.evals.iter_mut().enumerate() {
+                // The evaluations in `poly_eval` start from 2, so we increase eval_idx by 2
+                // to compute the evaluation at the correct point.
+                let eval_idx = eval_idx + 2;
                 *poly_eval = self
                     .row
                     .evaluate_at(eval_idx, poly, &self.challenges_evals[eval_idx]);
@@ -118,14 +111,15 @@ pub struct RowEvaluator<F: Field> {
     // List of polynomial expressions Gⱼ
     queried_polys: Vec<QueriedExpression<F>>,
 
-    // buffer for storing all row values
+    // buffer for storing all row values values
     row: Row<F>,
 
+    // Buffer for storing the polynomial evaluations
     polys_evals_buffer: Vec<F>,
 }
 
 impl<F: Field> RowEvaluator<F> {
-    // Gate evaluator for when only a single evaluation is required
+    // Prepares a `RowEvaluator` for the polynomial `polys`
     pub fn new(polys: &[Expression<F>], challenges: &[Vec<F>]) -> Self {
         let queries = Queries::from_polys(&polys);
 
@@ -145,7 +139,7 @@ impl<F: Field> RowEvaluator<F> {
         }
     }
 
-    /// Evaluates all polynomials in the gate at the given `row_idx`, storing the result in `evals`.
+    /// Evaluates all polynomials at the given `row_idx`, returning a slice containing the evaluations.
     pub fn evaluate(
         &mut self,
         row_idx: usize,
@@ -166,22 +160,6 @@ impl<F: Field> RowEvaluator<F> {
     }
 }
 
-/// For a linear polynomial p(X) such that p(0) = eval0, p(1) = eval1,
-/// return a vector [p(0), p(1), ..., p(num_evals-1)]
-pub fn boolean_evaluations<F: Field>(eval0: F, eval1: F, num_evals: usize) -> Vec<F> {
-    debug_assert!(2 <= num_evals);
-    let mut result = vec![F::ZERO; num_evals];
-
-    let diff = eval1 - eval0;
-
-    result[0] = eval0;
-    result[1] = eval1;
-    for i in 2..num_evals {
-        result[i] = result[i - 1] + diff;
-    }
-    result
-}
-
 /// For a sequence of n linear polynomial [p₁(X), p₂(X), …, pₙ(X)], given as
 ///  `evals0` = [p₁(0), p₂(0)  , …, pₙ(0)], `evals1` = [p₁(1), p₂(1), …, pₙ(1)],
 /// return the vector of all m = `num_evals` evaluations
@@ -191,7 +169,7 @@ pub fn boolean_evaluations<F: Field>(eval0: F, eval1: F, num_evals: usize) -> Ve
 ///  …
 ///  [p₁(m-1), p₂(m-1), …, pₙ(m-1)],
 /// ]
-pub fn boolean_evaluations_vec<F: Field>(
+fn boolean_evaluations_vec<F: Field>(
     evals0: Vec<F>,
     evals1: Vec<F>,
     num_evals: usize,
@@ -216,37 +194,32 @@ pub fn boolean_evaluations_vec<F: Field>(
     result
 }
 
+/// Given two vectors p₀, p₁, this structure can be used to efficiently evaluate
+/// pᵢ(D) for D = {2, 3, …, `max_evals`}, where pᵢ(X) = (1−X)·₀,ᵢ + X·₁,ᵢ
 pub struct PolyBooleanEvaluator<'a, F: Field> {
     poly_0: &'a Polynomial<F, LagrangeCoeff>,
     poly_1: &'a Polynomial<F, LagrangeCoeff>,
-    evals: Vec<F>,
+    evals: EvaluatedFrom2<F>,
 }
 
 impl<'a, F: Field> PolyBooleanEvaluator<'a, F> {
+    /// Create a new evaluator for the domain D = {2, 3, …, `max_evals`}
     pub fn new(
         poly_0: &'a Polynomial<F, LagrangeCoeff>,
         poly_1: &'a Polynomial<F, LagrangeCoeff>,
         num_evals: usize,
     ) -> Self {
-        debug_assert!(2 <= num_evals);
         Self {
             poly_0,
             poly_1,
-            evals: vec![F::ZERO; num_evals],
+            evals: EvaluatedFrom2::new_empty(num_evals),
         }
     }
 
-    pub fn evaluate(&mut self, row_idx: usize) -> &[F] {
-        let num_evals = self.evals.len();
-        self.evals[0] = self.poly_0[row_idx];
-        self.evals[1] = self.poly_1[row_idx];
-
-        let diff = self.evals[1] - self.evals[0];
-
-        for eval_idx in 2..num_evals {
-            self.evals[eval_idx] = self.evals[eval_idx - 1] + diff;
-        }
-
+    /// Return a reference to pᵢ(D) where i = `row_idx`.
+    pub fn evaluate_from_2(&mut self, row_idx: usize) -> &EvaluatedFrom2<F> {
+        self.evals
+            .reset_with_boolean_evals(self.poly_0[row_idx], self.poly_1[row_idx]);
         &self.evals
     }
 }

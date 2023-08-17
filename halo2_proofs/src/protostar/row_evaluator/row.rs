@@ -59,16 +59,14 @@ impl<F: Field> Row<F> {
         row_idx: usize,
         selectors: &[Vec<bool>],
         fixed: &[Polynomial<F, LagrangeCoeff>],
-        instance_0: &[Polynomial<F, LagrangeCoeff>],
-        instance_1: &[Polynomial<F, LagrangeCoeff>],
-        advice_0: &[Polynomial<F, LagrangeCoeff>],
-        advice_1: &[Polynomial<F, LagrangeCoeff>],
+        instance: [&[Polynomial<F, LagrangeCoeff>]; 2],
+        advice: [&[Polynomial<F, LagrangeCoeff>]; 2],
     ) {
         self.populate_selectors(row_idx, selectors);
         self.populate_fixed(row_idx, fixed);
 
-        self.populate_advice(row_idx, 0, advice_0);
-        self.populate_advice(row_idx, 1, advice_1);
+        self.populate_advice(row_idx, 0, advice[0]);
+        self.populate_advice(row_idx, 1, advice[1]);
         let num_advice = self.queries.advice.len();
 
         for i in 0..num_advice {
@@ -81,8 +79,8 @@ impl<F: Field> Row<F> {
             }
         }
 
-        self.populate_instance(row_idx, 0, instance_0);
-        self.populate_instance(row_idx, 1, instance_1);
+        self.populate_instance(row_idx, 0, instance[0]);
+        self.populate_instance(row_idx, 1, instance[1]);
         let num_instance = self.queries.instance.len();
         for i in 0..num_instance {
             self.instance_diff[i] = self.instance_evals[1][i] - self.instance_evals[0][i]

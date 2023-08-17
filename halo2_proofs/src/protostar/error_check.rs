@@ -12,24 +12,22 @@ use rayon::prelude::{
 };
 
 use crate::{
-    arithmetic::{field_integers, parallelize, powers},
+    arithmetic::{eval_polynomial, lagrange_interpolate, parallelize, powers},
     plonk::{self, lookup::Argument, Expression},
     poly::{
         commitment::{Blind, Params},
         LagrangeCoeff, Polynomial,
     },
-    protostar::{
-        error_check::lookup::{error_poly_lookup_inputs, error_poly_lookup_tables},
-        row_evaluator::{
-            boolean_evaluations, boolean_evaluations_vec, PolyBooleanEvaluator, RowBooleanEvaluator,
-        },
-    },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
 use super::{
+    error_check::lookup::{error_poly_lookup_inputs, error_poly_lookup_tables},
     keygen::ProvingKey,
-    row_evaluator::RowEvaluator,
+    row_evaluator::{
+        evaluated_poly::EvaluatedFrom2, interpolate::LagrangeInterpolater, PolyBooleanEvaluator,
+        RowBooleanEvaluator, RowEvaluator,
+    },
     transcript::{
         advice::AdviceTranscript, compressed_verifier::CompressedVerifierTranscript,
         instance::InstanceTranscript, lookup::LookupTranscipt,
@@ -41,9 +39,6 @@ mod lookup;
 /// Each constraint error polynomial must be multiplied by the challenge(s) beta.
 /// This allows us to compute the degree and therefore number of evaluations of e(X).
 const BETA_POLY_DEGREE: usize = 1;
-/// As an optimization, we can store the evaluations [e₀(X), …, eₘ₋₁(X)] in the accumulator.
-/// This allows us to skip the evaluations in X ∈ {0,1}.
-const STARTING_EVAL_IDX: usize = 2;
 
 /// An `Accumulator` contains the entirety of the IOP transcript,
 /// including commitments and verifier challenges.
@@ -164,12 +159,12 @@ impl<C: CurveAffine> Accumulator<C> {
             [e₀(1), …, eₘ₋₁(1)] in `new`
         Therefore, we only actually evaluate the polynomials on the restricted sets Dⱼ' = Dⱼ \ {0,1}.
         */
-        let mut gates_error_polys_evals: Vec<Vec<_>> = gates_error_polys_num_evals
+        let mut gates_error_polys_evals_from_2: Vec<Vec<_>> = gates_error_polys_num_evals
             .iter()
             .map(|error_polys_num_evals| {
                 error_polys_num_evals
                     .iter()
-                    .map(|num_evals| vec![C::Scalar::ZERO; *num_evals])
+                    .map(|num_evals| EvaluatedFrom2::new_empty(*num_evals))
                     .collect()
             })
             .collect();
@@ -179,7 +174,7 @@ impl<C: CurveAffine> Accumulator<C> {
         This defines the maximal evaluation domain D = {0, 1, …, dₘₐₓ + BETA_POLY_DEGREE + 1}
         This will allow us to compute the evaluations βᵢ(D)
         */
-        let max_num_evals = *gates_error_polys_num_evals
+        let max_gate_num_evals = *gates_error_polys_num_evals
             .iter()
             .flat_map(|gates_num_evals| gates_num_evals.iter())
             .max()
@@ -199,7 +194,7 @@ impl<C: CurveAffine> Accumulator<C> {
         let mut gate_evs: Vec<_> = pk
             .folding_constraints()
             .iter()
-            .zip(gates_error_polys_evals.iter())
+            .zip(gates_error_polys_evals_from_2.iter())
             .map(|(polys, gate_error_polys_evals)| {
                 RowBooleanEvaluator::new(
                     polys,
@@ -215,14 +210,14 @@ impl<C: CurveAffine> Accumulator<C> {
         TODO(@adr1anh): investigate whether we should precompute them all and cache the results.
         */
         let mut beta_ev =
-            PolyBooleanEvaluator::new(self.beta_poly(), new.beta_poly(), max_num_evals);
+            PolyBooleanEvaluator::new(self.beta_poly(), new.beta_poly(), max_gate_num_evals);
 
         /*
         TODO(@adr1anh): Parallelize this loop.
          */
         for row_idx in 0..num_rows {
             // Get the next evaluation βᵢ(D) of βᵢ(X) = ((1-X)⋅acc.βᵢ + X⋅acc.βᵢ)
-            let beta_poly_evals = beta_ev.evaluate(row_idx);
+            let beta_poly_evals = beta_ev.evaluate_from_2(row_idx);
 
             for (gate_idx, num_gate_constraints) in num_constraints_per_gate.iter().enumerate() {
                 // Return early if the selector for the gate is off at this row.
@@ -236,20 +231,17 @@ impl<C: CurveAffine> Accumulator<C> {
                 // Evaluate [e₀,ᵢ(D₀), …, eₘ₋₁,ᵢ(Dₘ₋₁)] into `row_error_polys_evals`
                 //
                 // As an optimization, we skip the evaluations at X ∈ {0,1}
-                let row_error_polys_evals = gate_ev.evaluate_all_from(
-                    STARTING_EVAL_IDX,
+                let row_error_polys_evals = gate_ev.evaluate_all_from_2(
                     row_idx,
                     &pk.selectors,
                     &pk.fixed,
-                    &self.instance_polys(),
-                    &new.instance_polys(),
-                    &self.advice_polys(),
-                    &new.advice_polys(),
+                    [&self.instance_polys(), &new.instance_polys()],
+                    [&self.advice_polys(), &new.advice_polys()],
                 );
 
                 // Get the running sums for [e₀(D₀), …, eₘ₋₁(Dₘ₋₁)] for the current gate
                 // to which we want to add the row's error polynomials evaluations.
-                let error_polys_evals = &mut gates_error_polys_evals[gate_idx];
+                let error_polys_evals = &mut gates_error_polys_evals_from_2[gate_idx];
                 for j in 0..*num_gate_constraints {
                     // eⱼ(Dⱼ)
                     let error_poly_evals = &mut error_polys_evals[j];
@@ -263,13 +255,7 @@ impl<C: CurveAffine> Accumulator<C> {
                     NOTE: `beta_poly_evals` is most-likely longer than the other iterators,
                     but `zip` will only produce as many elements as the shortest of the iterators.
                     */
-                    for (error_poly_eval, (row_error_poly_eval, beta_eval)) in error_poly_evals
-                        .iter_mut()
-                        .zip(zip(row_error_poly_evals.iter(), beta_poly_evals.iter()))
-                        .skip(STARTING_EVAL_IDX)
-                    {
-                        *error_poly_eval += *beta_eval * row_error_poly_eval;
-                    }
+                    error_poly_evals.add_prod(row_error_poly_evals, beta_poly_evals);
                 }
             }
         }
@@ -332,35 +318,51 @@ impl<C: CurveAffine> Accumulator<C> {
         /*
         Now that we have evaluated all gates, we no longer need to keep track of the nested structure.
         We flatten `gates_error_polys_evals` into `error_polys_evals`, and let `m = num_constraints`.
-        The result is the list of error polynomial evaluations e₀(D₀), …, eₘ₋₁(Dₘ₋₁)
+        The result is the list of error polynomial evaluations e₀(D₀'), …, eₘ₋₁(Dₘ₋₁')
         */
-        let error_polys_evals: Vec<_> = {
-            // First collect all gate error polynomial's evaluations e₀(D₀'), …, eₘ₋₁(Dₘ₋₁')
-            let mut error_polys_evals: Vec<_> = gates_error_polys_evals
-                .into_iter()
-                .flat_map(|poly| poly.into_iter())
-                .chain(lookup_error_polys_evals.into_iter())
-                .collect();
+        let error_polys_evals_from_2: Vec<_> = gates_error_polys_evals_from_2
+            .into_iter()
+            .flat_map(|poly| poly.into_iter())
+            .chain(lookup_error_polys_evals.into_iter())
+            .collect();
 
-            // Sanity checks
-            debug_assert_eq!(error_polys_evals.len(), num_constraints);
-            debug_assert_eq!(self.constraint_errors.len(), num_constraints);
-            debug_assert_eq!(new.constraint_errors.len(), num_constraints);
+        // Sanity checks
+        debug_assert_eq!(error_polys_evals_from_2.len(), num_constraints);
+        debug_assert_eq!(self.constraint_errors.len(), num_constraints);
+        debug_assert_eq!(new.constraint_errors.len(), num_constraints);
 
-            // Re-insert evaluations at X = 0, 1
-            for (j, error_poly_evals) in error_polys_evals.iter_mut().enumerate() {
-                // Get eⱼ(0), eⱼ(1) from the accumulators `self` and `new`
-                error_poly_evals[0] = self.constraint_errors[j];
-                error_poly_evals[1] = new.constraint_errors[j];
-            }
-            error_polys_evals
+        /*
+        Precompute `LagrangeInterpolator` which containts the inverse Vandermonde matrices
+        for computing a polynomial's coefficients from its evaluations.
+        */
+        let interpolator = {
+            let max_num_evals = error_polys_evals_from_2
+                .iter()
+                .map(|evals| evals.num_evals())
+                .max()
+                .unwrap();
+
+            LagrangeInterpolater::<C::Scalar>::new_integer_eval_domain(max_num_evals)
         };
 
         /*
-        Convert polynomials evaluations e₀(D₀), …, eₘ₋₁(Dₘ₋₁)
-        into their coefficient representation  e₀(X), …, eₘ₋₁(X)
+        Compute the polynomials e₀(X), …, eₘ₋₁(X) in coefficient coefficient
         */
-        let error_polys = batch_lagrange_interpolate_integers(&error_polys_evals);
+        let error_polys: Vec<Vec<C::Scalar>> = error_polys_evals_from_2
+            .into_iter()
+            .zip(zip(
+                self.constraint_errors.iter(),
+                new.constraint_errors.iter(),
+            ))
+            // Get eⱼ(0), eⱼ(1) from the accumulators `self` and `new` and map eⱼ(Dⱼ') to eⱼ(Dⱼ)
+            .map(|(error_poly_evals_from_2, (eval0, eval1))| {
+                error_poly_evals_from_2.to_evaluated(*eval0, *eval1)
+            })
+            /*
+            Map polynomials evaluations e₀(D₀), …, eₘ₋₁(Dₘ₋₁) into their coefficient representation  e₀(X), …, eₘ₋₁(X)
+            */
+            .map(|error_poly_evals| interpolator.interpolate(&error_poly_evals))
+            .collect();
 
         /*
         For linear independence of all error polynomials, we multiply each polynomial eⱼ(X) by
@@ -370,40 +372,40 @@ impl<C: CurveAffine> Accumulator<C> {
         We add 1 for the length.
         */
         let final_error_poly_len = error_polys.iter().map(|poly| poly.len()).max().unwrap() + 1;
-        let final_error_poly = {
-            debug_assert_eq!(self.ys.len(), num_constraints);
-            debug_assert_eq!(new.ys.len(), num_constraints);
-            error_polys
-                .iter()
-                .enumerate()
-                // Map each eⱼ(X) to yⱼ(X)⋅eⱼ(X)
-                .map(|(j, error_poly)| {
-                    let acc_y = self.ys[j];
-                    let new_y = new.ys[j];
-                    // yⱼ(X) = acc.yⱼ + X⋅(new.yⱼ - acc.yⱼ)
-                    let y_poly = [acc_y, new_y - acc_y];
 
-                    let mut final_error_poly = vec![C::Scalar::ZERO; error_poly.len() + 1];
+        debug_assert_eq!(self.ys.len(), num_constraints);
+        debug_assert_eq!(new.ys.len(), num_constraints);
 
-                    for (i, a_i) in error_poly.iter().enumerate() {
-                        final_error_poly[i] += y_poly[0] * a_i;
-                        final_error_poly[i + 1] += y_poly[1] * a_i;
+        let final_error_poly = error_polys
+            .iter()
+            .enumerate()
+            // Map each eⱼ(X) to yⱼ(X)⋅eⱼ(X)
+            .map(|(j, error_poly)| {
+                let acc_y = self.ys[j];
+                let new_y = new.ys[j];
+                // yⱼ(X) = acc.yⱼ + X⋅(new.yⱼ - acc.yⱼ)
+                let y_poly = [acc_y, new_y - acc_y];
+
+                let mut final_error_poly = vec![C::Scalar::ZERO; error_poly.len() + 1];
+
+                for (i, a_i) in error_poly.iter().enumerate() {
+                    final_error_poly[i] += y_poly[0] * a_i;
+                    final_error_poly[i + 1] += y_poly[1] * a_i;
+                }
+                final_error_poly
+            })
+            // Compute sum e(X) = ∑ⱼ yⱼ(X)⋅eⱼ(X)
+            .fold(
+                vec![C::Scalar::ZERO; final_error_poly_len],
+                |mut final_error_poly, final_error_poly_j| {
+                    debug_assert!(final_error_poly_j.len() <= final_error_poly_len);
+
+                    for (i, poly_j_coeff_i) in final_error_poly_j.iter().enumerate() {
+                        final_error_poly[i] += poly_j_coeff_i;
                     }
                     final_error_poly
-                })
-                // Compute sum e(X) = ∑ⱼ yⱼ(X)⋅eⱼ(X)
-                .fold(
-                    vec![C::Scalar::ZERO; final_error_poly_len],
-                    |mut final_error_poly, final_error_poly_j| {
-                        debug_assert!(final_error_poly_j.len() <= final_error_poly_len);
-
-                        for (i, poly_j_coeff_i) in final_error_poly_j.iter().enumerate() {
-                            final_error_poly[i] += poly_j_coeff_i;
-                        }
-                        final_error_poly
-                    },
-                )
-        };
+                },
+            );
 
         /*
         Sanity check for ensuring that the accumulators have the expected error evaluations.
@@ -445,11 +447,11 @@ impl<C: CurveAffine> Accumulator<C> {
 
         // Cache the constraint errors eⱼ(α), for use in the next folding iteration
         for (j, error_poly_j) in error_polys.iter().enumerate() {
-            self.constraint_errors[j] = evaluate_poly(error_poly_j, alpha)
+            self.constraint_errors[j] = eval_polynomial(error_poly_j, alpha)
         }
 
         // Evaluation of e(X) = (1-X)X⋅e'(X) + (1-X)⋅e(0) + X⋅e(1) in α
-        self.error = evaluate_poly(&final_error_poly, alpha);
+        self.error = eval_polynomial(&final_error_poly, alpha);
 
         // fold challenges
         for (c_acc, c_new) in zip(self.challenges_iter_mut(), new.challenges_iter()) {
@@ -689,71 +691,6 @@ impl<C: CurveAffine> Accumulator<C> {
     }
 }
 
-/// Returns coefficients of an n - 1 degree polynomial given a set of n points
-/// and their evaluations. This function will panic if two values in `points`
-/// are the same.
-pub fn batch_lagrange_interpolate_integers<F: Field>(evals: &[Vec<F>]) -> Vec<Vec<F>> {
-    let num_evals: Vec<_> = evals.iter().map(|evals| evals.len()).collect();
-    let max_num_evals = *num_evals.iter().max().unwrap();
-
-    let points: Vec<F> = field_integers().take(max_num_evals).collect();
-
-    let mut denoms = Vec::with_capacity(points.len());
-    for (j, x_j) in points.iter().enumerate() {
-        let mut denom = Vec::with_capacity(points.len() - 1);
-        for x_k in points
-            .iter()
-            .enumerate()
-            .filter(|&(k, _)| k != j)
-            .map(|a| a.1)
-        {
-            denom.push(*x_j - x_k);
-        }
-        denoms.push(denom);
-    }
-    // Compute (x_j - x_k)^(-1) for each j != i
-    denoms.iter_mut().flat_map(|v| v.iter_mut()).batch_invert();
-
-    let mut final_polys: Vec<_> = num_evals
-        .iter()
-        .map(|num_evals| vec![F::ZERO; *num_evals])
-        .collect();
-
-    for (final_poly, evals) in final_polys.iter_mut().zip(evals.iter()) {
-        for (j, (denoms, eval)) in denoms.iter().zip(evals.iter()).enumerate() {
-            let mut tmp: Vec<F> = Vec::with_capacity(evals.len());
-            let mut product = Vec::with_capacity(evals.len() - 1);
-            tmp.push(F::ONE);
-            for (x_k, denom) in points
-                .iter()
-                .take(evals.len())
-                .enumerate()
-                .filter(|&(k, _)| k != j)
-                .map(|a| a.1)
-                .zip(denoms.iter())
-            {
-                product.resize(tmp.len() + 1, F::ZERO);
-                for ((a, b), product) in tmp
-                    .iter()
-                    .chain(std::iter::once(&F::ZERO))
-                    .zip(std::iter::once(&F::ZERO).chain(tmp.iter()))
-                    .zip(product.iter_mut())
-                {
-                    *product = *a * (-*denom * x_k) + *b * *denom;
-                }
-                std::mem::swap(&mut tmp, &mut product);
-            }
-            assert_eq!(tmp.len(), evals.len());
-            assert_eq!(product.len(), evals.len() - 1);
-            for (final_coeff, interpolation_coeff) in final_poly.iter_mut().zip(tmp.into_iter()) {
-                *final_coeff += interpolation_coeff * eval;
-            }
-        }
-    }
-
-    final_polys
-}
-
 // Given a polynomial p(X) of degree d > 1, compute its quotient q(X)
 // such that p(X) = (1-X)X⋅q(X).
 // Panics if deg(p) ≤ 1 or if p(0) ≠ 0 or p(1) ≠ 0
@@ -777,14 +714,4 @@ fn quotient_by_boolean_vanishing<F: Field>(poly: &[F]) -> Vec<F> {
         "poly(1) != 0"
     );
     quotient
-}
-
-/// Evaluate a polynomial `poly` given as list of coefficients.
-fn evaluate_poly<F: Field>(poly: &[F], point: F) -> F {
-    let mut error = F::ZERO;
-    for coeff in poly.iter().rev() {
-        error *= point;
-        error += coeff;
-    }
-    error
 }
