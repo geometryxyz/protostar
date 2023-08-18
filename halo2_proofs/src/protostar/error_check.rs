@@ -5,9 +5,9 @@ use std::{
     ops::{Add, Deref, DerefMut, Index, IndexMut, RangeFrom, RangeFull, Sub},
 };
 
+mod folding_constraint_info;
 pub(crate) mod gate;
 mod row;
-mod folding_constraint_info;
 
 use crate::{
     arithmetic::{field_integers, parallelize, powers},
@@ -15,7 +15,10 @@ use crate::{
         commitment::{Blind, CommitmentScheme, Params},
         empty_lagrange, LagrangeCoeff, Polynomial, Rotation,
     },
-    protostar::error_check::{gate::GateEvaluator, folding_constraint_info::{FoldingConstraintInfo, GatesErrorPolyEvaluations}},
+    protostar::error_check::{
+        folding_constraint_info::{FoldingConstraintInfo, GatesErrorPolyEvaluations},
+        gate::GateEvaluator,
+    },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ff::{BatchInvert, Field};
@@ -38,8 +41,6 @@ const BETA_POLY_DEGREE: usize = 1;
 /// This allows us to skip the evaluations in X ∈ {0,1}.
 const STARTING_EVAL_IDX: usize = 2;
 
-
-
 /// An `Accumulator` contains the entirety of the IOP transcript,
 /// including commitments and verifier challenges.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,7 +48,6 @@ pub struct Accumulator<C: CurveAffine> {
     instance_transcript: InstanceTranscript<C>,
     advice_transcript: AdviceTranscript<C>,
     lookup_transcript: LookupTranscipt<C>,
-    
 
     compressed_verifier_transcript: CompressedVerifierTranscript<C>,
 
@@ -111,6 +111,9 @@ impl<C: CurveAffine> Accumulator<C> {
         // For gate at index `gate_idx` and each row i of the accumulator, we temporarily store the list of evaluations
         //     [e₀,ᵢ(D₀), …, eₘ₋₁,ᵢ(Dₘ₋₁)]
         // in `row_gates_error_polys_evals[gate_idx]`
+
+        // want(tk): parallelize the following loop
+        // using parallelize function from halo2/src/arithmetic.rs
 
         for row_idx in 0..pk.num_usable_rows() {
             // Get the next evaluation βᵢ(D) of βᵢ(X) = ((1-X)⋅acc.βᵢ + X⋅acc.βᵢ)
@@ -183,7 +186,6 @@ impl<C: CurveAffine> Accumulator<C> {
                 }
             }
         }
-
         /*
         Now that we have evaluated all gates, we no longer need to keep track of the nested structure.
         We flatten `gates_error_polys_evals` into `error_polys_evals`, and let `m = num_constraints`.
@@ -305,35 +307,43 @@ impl<C: CurveAffine> Accumulator<C> {
 
         // Evaluation of e(X) = (1-X)X⋅e'(X) + (1-X)⋅e(0) + X⋅e(1) in α
         self.error = evaluate_poly(&final_error_poly, alpha);
+        self.fold_elements(&new, alpha);
+    }
 
+    /// Fold another accumulator in `self` with a given alpha challenge.
+    fn fold_elements(&mut self, new: &Accumulator<C>, alpha: <C as CurveAffine>::ScalarExt) {
         // fold challenges
-        for (c_acc, c_new) in zip(self.challenges_iter_mut(), new.challenges_iter()) {
+        for (c_acc, c_new) in self.challenges_iter_mut().zip(new.challenges_iter()) {
             *c_acc += alpha * (*c_new - *c_acc);
         }
 
         // fold polynomials
-        for (poly_acc, poly_new) in zip(self.polynomials_iter_mut(), new.polynomials_iter()) {
+        for (poly_acc, poly_new) in self.polynomials_iter_mut().zip(new.polynomials_iter()) {
             poly_acc.boolean_linear_combination(poly_new, alpha);
         }
 
         // fold commitments
         {
             // Compute folded commitments in projective coordinates
-            let commitments_projective: Vec<_> =
-                zip(self.commitments_iter(), new.commitments_iter())
-                    .map(|(c_acc, c_new)| (*c_new - *c_acc) * alpha + *c_acc)
-                    .collect();
+            let commitments_projective: Vec<_> = self
+                .commitments_iter()
+                .zip(new.commitments_iter())
+                .map(|(c_acc, c_new)| (*c_new - *c_acc) * alpha + *c_acc)
+                .collect();
             // Convert to affine coordinates
             let mut commitments_affine = vec![C::identity(); commitments_projective.len()];
             C::CurveExt::batch_normalize(&commitments_projective, &mut commitments_affine);
-            for (c_acc, c_new) in zip(self.commitments_iter_mut(), commitments_affine.into_iter()) {
-                *c_acc = c_new
+            for (c_acc, c_new) in self
+                .commitments_iter_mut()
+                .zip(commitments_affine.into_iter())
+            {
+                *c_acc = c_new;
             }
         }
 
         // fold blinds
-        for (blind_acc, blind_new) in zip(self.blinds_iter_mut(), new.blinds_iter()) {
-            *blind_acc += (*blind_new - *blind_acc) * alpha
+        for (blind_acc, blind_new) in self.blinds_iter_mut().zip(new.blinds_iter()) {
+            *blind_acc += (*blind_new - *blind_acc) * alpha;
         }
     }
 
@@ -633,4 +643,3 @@ fn evaluate_poly<F: Field>(poly: &[F], point: F) -> F {
     // todo(tk): this was F::ZERO, but shouldn't this be F::ONE?
     poly.iter().fold(F::ONE, |acc, coeff| acc * point + coeff)
 }
-

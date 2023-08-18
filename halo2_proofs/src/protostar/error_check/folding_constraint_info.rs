@@ -19,15 +19,16 @@ use group::Curve;
 use halo2curves::CurveAffine;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
-use super::{super::{
-    keygen::ProvingKey,
-    transcript::{
-        advice::AdviceTranscript, compressed_verifier::CompressedVerifierTranscript,
-        instance::InstanceTranscript, lookup::LookupTranscipt,
+use super::{
+    super::{
+        keygen::ProvingKey,
+        transcript::{
+            advice::AdviceTranscript, compressed_verifier::CompressedVerifierTranscript,
+            instance::InstanceTranscript, lookup::LookupTranscipt,
+        },
     },
-}, BETA_POLY_DEGREE};
-
-
+    BETA_POLY_DEGREE,
+};
 
 pub(super) struct FoldingConstraintInfo<C: CurveAffine> {
     /// The number of folding constraints in each gate in the proving key.
@@ -122,8 +123,7 @@ impl<C: CurveAffine> FoldingConstraintInfo<C> {
 /// Therefore, we only actually evaluate the polynomials on the restricted sets Dⱼ' = Dⱼ \ {0,1}.
 ///
 /// Separate from `FoldingConstraintInfo` because mutability.
-pub(super) type GatesPolysEvaluations<C> =
-    Vec<Vec<Vec<<C as CurveAffine>::ScalarExt>>>;
+pub(super) type GatesPolysEvaluations<C> = Vec<Vec<Vec<<C as CurveAffine>::ScalarExt>>>;
 pub(super) struct GatesErrorPolyEvaluations<C: CurveAffine> {
     pub evals: GatesPolysEvaluations<C>,
     /// A clone of `evals` such that we may access the original values.
