@@ -2,6 +2,7 @@ use std::iter::zip;
 
 use ff::Field;
 
+use super::BETA_POLY_DEGREE;
 use crate::{
     plonk::Expression,
     poly::{LagrangeCoeff, Polynomial},
@@ -10,7 +11,9 @@ use crate::{
     },
 };
 
-use super::BETA_POLY_DEGREE;
+const G_POLY_DEGREE: usize = 1;
+const THETA_POLY_DEGREE: usize = 1;
+const H_POLY_DEGREE: usize = 1;
 
 pub fn error_poly_lookup_inputs<F: Field>(
     num_rows: usize,
@@ -22,20 +25,17 @@ pub fn error_poly_lookup_inputs<F: Field>(
     instance: [&[Polynomial<F, LagrangeCoeff>]; 2],
     input_expressions: &[Expression<F>],
     challenge_r: [&F; 2],
-    challenge_thetas: [&Vec<F>; 2],
+    challenge_thetas: [&[F]; 2],
     g: [&Polynomial<F, LagrangeCoeff>; 2],
 ) -> EvaluatedFrom2<F> {
-    const G_POLY_DEGREE: usize = 1;
-    const THETA_POLY_DEGREE: usize = 1;
-
     let num_inputs = input_expressions.len();
-    let inputs_num_evals: Vec<usize> = input_expressions
+    let num_evals: usize = input_expressions
         .iter()
         .map(|poly| {
             poly.folding_degree() + BETA_POLY_DEGREE + G_POLY_DEGREE + THETA_POLY_DEGREE + 1
         })
-        .collect();
-    let num_evals = *inputs_num_evals.iter().max().unwrap();
+        .max()
+        .unwrap();
 
     let mut inputs_ev = RowBooleanEvaluator::new(
         input_expressions,
@@ -92,21 +92,18 @@ pub fn error_poly_lookup_tables<F: Field>(
     instance: [&[Polynomial<F, LagrangeCoeff>]; 2],
     table_expressions: &[Expression<F>],
     challenge_r: [&F; 2],
-    challenge_thetas: [&Vec<F>; 2],
+    challenge_thetas: [&[F]; 2],
     m: [&Polynomial<F, LagrangeCoeff>; 2],
     h: [&Polynomial<F, LagrangeCoeff>; 2],
 ) -> EvaluatedFrom2<F> {
-    const H_POLY_DEGREE: usize = 1;
-    const THETA_POLY_DEGREE: usize = 1;
-
     let num_tables = table_expressions.len();
-    let tables_num_evals: Vec<usize> = table_expressions
+    let num_evals = table_expressions
         .iter()
         .map(|poly| {
             poly.folding_degree() + BETA_POLY_DEGREE + H_POLY_DEGREE + THETA_POLY_DEGREE + 1
         })
-        .collect();
-    let num_evals = *tables_num_evals.iter().max().unwrap();
+        .max()
+        .unwrap();
 
     let mut tables_ev = RowBooleanEvaluator::new(
         table_expressions,
