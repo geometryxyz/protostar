@@ -49,7 +49,7 @@ pub fn create_accumulator<
     // pk.vk.hash_into(transcript)?;
 
     // Add public inputs/outputs to the transcript, and convert them to `Polynomial`s
-    let instance_transcript = create_instance_transcript(params, pk.cs(), instances, transcript)?;
+    let instance_transcript = create_instance_transcript(params, &pk.cs, instances, transcript)?;
 
     // Run multi-phase IOP section to generate all `Advice` columns
     let advice_transcript = create_advice_transcript(

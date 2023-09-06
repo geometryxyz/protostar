@@ -29,9 +29,7 @@ use std::{
 /// the IOP protocol.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdviceTranscript<C: CurveAffine> {
-    // Array of challenges and their powers
-    // challenges[i][d] = challenge_i^{d+1}
-    pub challenges: Vec<Vec<C::Scalar>>,
+    pub challenges: Vec<C::Scalar>,
     pub advice_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     pub advice_commitments: Vec<C>,
     pub advice_blinds: Vec<Blind<C::Scalar>>,
@@ -68,7 +66,7 @@ pub fn create_advice_transcript<
         config
     };
 
-    let meta = &pk.cs();
+    let meta = &pk.cs;
 
     // Synthesize the circuit over multiple iterations
 
@@ -192,13 +190,6 @@ pub fn create_advice_transcript<
         .map(|index| challenges.remove(&index).unwrap())
         .collect::<Vec<_>>();
 
-    let challenge_degrees = pk.max_challenge_powers();
-    let challenges = challenges
-        .into_iter()
-        .zip(challenge_degrees)
-        .map(|(c, d)| powers(c).skip(1).take(d).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-
     Ok(AdviceTranscript {
         challenges,
         advice_polys,
@@ -208,20 +199,12 @@ pub fn create_advice_transcript<
 }
 
 impl<C: CurveAffine> AdviceTranscript<C> {
-    pub fn challenges(&self) -> Vec<C::Scalar> {
-        self.challenges.iter().map(|cs| cs[0]).collect()
-    }
-
     pub fn challenges_iter(&self) -> impl Iterator<Item = &C::Scalar> {
-        self.challenges
-            .iter()
-            .flat_map(|challenges| challenges.iter())
+        self.challenges.iter()
     }
 
     pub fn challenges_iter_mut(&mut self) -> impl Iterator<Item = &mut C::Scalar> {
-        self.challenges
-            .iter_mut()
-            .flat_map(|challenges| challenges.iter_mut())
+        self.challenges.iter_mut()
     }
 
     pub fn polynomials_iter(&self) -> impl Iterator<Item = &Polynomial<C::Scalar, LagrangeCoeff>> {

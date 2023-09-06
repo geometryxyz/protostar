@@ -4,7 +4,7 @@ use group::Curve;
 use halo2curves::CurveAffine;
 use rand_core::RngCore;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     iter::zip,
     ops::{Mul, MulAssign},
 };
@@ -56,13 +56,13 @@ pub(crate) fn create_lookup_transcript<
 >(
     params: &P,
     pk: &ProvingKey<C>,
-    challenges: &[Vec<C::Scalar>],
+    challenges: &[C::Scalar],
     advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
     instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
     mut rng: R,
     transcript: &mut T,
 ) -> LookupTranscipt<C> {
-    let lookups = pk.cs().lookups();
+    let lookups = &pk.cs.lookups;
     let num_lookups = lookups.len();
     if num_lookups == 0 {
         return LookupTranscipt {
@@ -71,7 +71,7 @@ pub(crate) fn create_lookup_transcript<
             singles_transcript: vec![],
         };
     }
-    let num_rows = params.n() as usize - pk.cs().blinding_factors() - 1 as usize;
+    let num_rows = params.n() as usize - pk.cs.blinding_factors() - 1 as usize;
 
     let table_values_map: Vec<_> = lookups
         .iter()
@@ -309,8 +309,8 @@ impl<C: CurveAffine> LookupTranscipt<C> {
 fn build_lookup_index_table<F: PrimeField>(
     table_expressions: &[Expression<F>],
     num_rows: usize,
-    challenges: &[Vec<F>],
-    selectors: &[Vec<bool>],
+    challenges: &[F],
+    selectors: &[BTreeSet<usize>],
     fixed: &[Polynomial<F, LagrangeCoeff>],
     instance: &[Polynomial<F, LagrangeCoeff>],
     advice: &[Polynomial<F, LagrangeCoeff>],
@@ -336,8 +336,8 @@ fn build_m_poly<F: PrimeField>(
     lookup_expressions: &[Expression<F>],
     table_index_map: &HashMap<Vec<u8>, usize>,
     num_rows: usize,
-    challenges: &[Vec<F>],
-    selectors: &[Vec<bool>],
+    challenges: &[F],
+    selectors: &[BTreeSet<usize>],
     fixed: &[Polynomial<F, LagrangeCoeff>],
     instance: &[Polynomial<F, LagrangeCoeff>],
     advice: &[Polynomial<F, LagrangeCoeff>],
@@ -366,8 +366,8 @@ fn build_m_poly<F: PrimeField>(
 fn build_g_poly<F: PrimeField>(
     lookup_expressions: &[Expression<F>],
     num_rows: usize,
-    challenges: &[Vec<F>],
-    selectors: &[Vec<bool>],
+    challenges: &[F],
+    selectors: &[BTreeSet<usize>],
     fixed: &[Polynomial<F, LagrangeCoeff>],
     instance: &[Polynomial<F, LagrangeCoeff>],
     advice: &[Polynomial<F, LagrangeCoeff>],
@@ -390,8 +390,8 @@ fn build_g_poly<F: PrimeField>(
 fn build_h_poly<F: PrimeField>(
     table_expressions: &[Expression<F>],
     num_rows: usize,
-    challenges: &[Vec<F>],
-    selectors: &[Vec<bool>],
+    challenges: &[F],
+    selectors: &[BTreeSet<usize>],
     fixed: &[Polynomial<F, LagrangeCoeff>],
     instance: &[Polynomial<F, LagrangeCoeff>],
     advice: &[Polynomial<F, LagrangeCoeff>],

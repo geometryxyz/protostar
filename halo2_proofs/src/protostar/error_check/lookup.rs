@@ -1,4 +1,4 @@
-use std::iter::zip;
+use std::{collections::BTreeSet, iter::zip};
 
 use ff::Field;
 
@@ -17,9 +17,9 @@ const H_POLY_DEGREE: usize = 1;
 
 pub fn error_poly_lookup_inputs<F: Field>(
     num_rows: usize,
-    selectors: &[Vec<bool>],
+    selectors: &[BTreeSet<usize>],
     fixed: &[Polynomial<F, LagrangeCoeff>],
-    challenges: [&[Vec<F>]; 2],
+    challenges: [&[F]; 2],
     betas: [&Polynomial<F, LagrangeCoeff>; 2],
     advice: [&[Polynomial<F, LagrangeCoeff>]; 2],
     instance: [&[Polynomial<F, LagrangeCoeff>]; 2],
@@ -84,9 +84,9 @@ pub fn error_poly_lookup_inputs<F: Field>(
 
 pub fn error_poly_lookup_tables<F: Field>(
     num_rows: usize,
-    selectors: &[Vec<bool>],
+    selectors: &[BTreeSet<usize>],
     fixed: &[Polynomial<F, LagrangeCoeff>],
-    challenges: [&[Vec<F>]; 2],
+    challenges: [&[F]; 2],
     betas: [&Polynomial<F, LagrangeCoeff>; 2],
     advice: [&[Polynomial<F, LagrangeCoeff>]; 2],
     instance: [&[Polynomial<F, LagrangeCoeff>]; 2],

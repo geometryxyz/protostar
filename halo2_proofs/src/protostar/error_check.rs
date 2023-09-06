@@ -13,11 +13,18 @@ use rayon::prelude::{
 
 use crate::{
     arithmetic::{eval_polynomial, lagrange_interpolate, parallelize, powers},
-    plonk::{self, lookup::Argument, Expression},
-    poly::{
-        commitment::{Blind, Params},
-        LagrangeCoeff, Polynomial,
+    plonk::{
+        self,
+        evaluation::{evaluate, evaluate_lc},
+        lookup::Argument,
+        Expression,
     },
+    poly::{
+        self,
+        commitment::{Blind, Params},
+        lagrange_from_vec, LagrangeCoeff, Polynomial,
+    },
+    protostar::keygen::extract_common_simple_selector,
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
@@ -98,7 +105,13 @@ impl<C: CurveAffine> Accumulator<C> {
         new: Accumulator<C>,
         transcript: &mut T,
     ) {
-        let num_rows = pk.num_usable_rows();
+        let (gate_constraints, gate_selectors): (Vec<_>, Vec<_>) = pk
+            .cs
+            .gates
+            .iter()
+            .map(|gate| extract_common_simple_selector(gate.polynomials()))
+            .unzip();
+
         /*
         Constraints are grouped by gate. Most constraint groups will have a common simple selector which
         selects whether the constraints are active. We can skip the evaluation of the entire group by first checking
@@ -110,16 +123,12 @@ impl<C: CurveAffine> Accumulator<C> {
         After evaluating all error polynomials for each gate, we consider the flattened list of constraints,
         and index them by `constraint_idx`
         */
-        let gate_selectors = pk.folding_constraints_selectors();
 
         /*
         Compute the number of constraints in each gate as well as the total number of constraints in all gates.
         */
-        let num_constraints_per_gate: Vec<_> = pk
-            .folding_constraints()
-            .iter()
-            .map(|polys| polys.len())
-            .collect();
+        let num_constraints_per_gate: Vec<_> =
+            gate_constraints.iter().map(|polys| polys.len()).collect();
         let num_constraints: usize = num_constraints_per_gate.iter().sum();
 
         /*
@@ -132,8 +141,7 @@ impl<C: CurveAffine> Accumulator<C> {
         Each eⱼ,ᵢ(X) has degree dⱼ + `BETA_POLY_DEGREE`, so we need (dⱼ + `BETA_POLY_DEGREE` + 1) evaluations in order to
         interpolate the full polynomial.
         */
-        let gates_error_polys_num_evals: Vec<Vec<usize>> = pk
-            .folding_constraints()
+        let gates_error_polys_num_evals: Vec<Vec<usize>> = gate_constraints
             .iter()
             .map(|polys| {
                 polys
@@ -191,8 +199,7 @@ impl<C: CurveAffine> Accumulator<C> {
         and return a reference to it when calling `evaluate`.
         We give a copy of the empty buffer of [e₀(D₀), …, eₘ₋₁(Dₘ₋₁)] so the `GateEvaluator` knows how many evaluations we want.
          */
-        let mut gate_evs: Vec<_> = pk
-            .folding_constraints()
+        let mut gate_evs: Vec<_> = gate_constraints
             .iter()
             .zip(gates_error_polys_evals_from_2.iter())
             .map(|(polys, gate_error_polys_evals)| {
@@ -215,14 +222,14 @@ impl<C: CurveAffine> Accumulator<C> {
         /*
         TODO(@adr1anh): Parallelize this loop.
          */
-        for row_idx in 0..num_rows {
+        for row_idx in 0..pk.num_rows {
             // Get the next evaluation βᵢ(D) of βᵢ(X) = ((1-X)⋅acc.βᵢ + X⋅acc.βᵢ)
             let beta_poly_evals = beta_ev.evaluate_from_2(row_idx);
 
             for (gate_idx, num_gate_constraints) in num_constraints_per_gate.iter().enumerate() {
                 // Return early if the selector for the gate is off at this row.
                 if let Some(selector) = gate_selectors[gate_idx] {
-                    if !pk.selectors[selector.index()][row_idx] {
+                    if !pk.selectors[selector.index()].contains(&row_idx) {
                         continue;
                     }
                 }
@@ -262,7 +269,7 @@ impl<C: CurveAffine> Accumulator<C> {
 
         // Compute evaluations of error polynomials for the lookup constraints
         let lookup_error_polys_evals: Vec<_> = pk
-            .cs()
+            .cs
             .lookups
             .iter()
             .enumerate()
@@ -273,7 +280,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 // SAFETY: We can safely unwrap the challenges since they are Some whenever pk.cs().lookups() is non-empty
 
                 let inputs_error_poly_evals = error_poly_lookup_inputs(
-                    num_rows,
+                    pk.num_rows,
                     &pk.selectors,
                     &pk.fixed,
                     [&self.advice_challenges(), &new.advice_challenges()],
@@ -292,7 +299,7 @@ impl<C: CurveAffine> Accumulator<C> {
                     [&tx0.g_poly, &tx1.g_poly],
                 );
                 let tables_error_poly_evals = error_poly_lookup_tables(
-                    num_rows,
+                    pk.num_rows,
                     &pk.selectors,
                     &pk.fixed,
                     [&self.advice_challenges(), &new.advice_challenges()],
@@ -503,110 +510,108 @@ impl<C: CurveAffine> Accumulator<C> {
 
         // Recompute e = ∑ᵢ βᵢ⋅eᵢ, where eᵢ = ∑ⱼ yⱼ⋅Gⱼ(acc[i])
         let folding_errors_ok = {
-            // Store βᵢ⋅eᵢ for each row i
-            let mut folding_errors = vec![C::Scalar::ZERO; pk.num_usable_rows()];
+            let mut errors = self.error_vector(pk);
 
-            parallelize(&mut folding_errors, |errors, start| {
-                let gates_selectors = pk.folding_constraints_selectors();
-                let folding_constraints = pk.folding_constraints();
-
-                // For each gate, create a slice of y's corresponding to the polynomials in the gate
-                let gates_ys: Vec<&[C::Scalar]> = {
-                    let mut start = 0;
-                    let mut gates_ys = Vec::with_capacity(folding_constraints.len());
-
-                    for polys in folding_constraints {
-                        let size = polys.len(); // Get size of inner vector
-                        let end = start + size;
-                        gates_ys.push(&self.ys[start..end]);
-                        start = end;
-                    }
-
-                    gates_ys
-                };
-
-                // Create a RowEvaluator for each gate
-                let mut folding_gate_evs: Vec<_> = folding_constraints
-                    .iter()
-                    .map(|polys| RowEvaluator::new(&polys, &self.advice_challenges()))
-                    .collect();
-
+            // Sum all eᵢ
+            parallelize(&mut errors, |errors, start| {
                 for (i, error) in errors.iter_mut().enumerate() {
                     let row = start + i;
-
-                    for (gate_ev, (gate_ys, gate_selector)) in folding_gate_evs
-                        .iter_mut()
-                        .zip(zip(gates_ys.iter(), gates_selectors.iter()))
-                    {
-                        // Check whether the gate's selector is active at this row
-                        if let Some(selector) = gate_selector {
-                            if !pk.selectors[selector.index()][row] {
-                                continue;
-                            }
-                        }
-
-                        // Evaluate [Gⱼ(acc[i])] for all Gⱼ in the gate
-                        let row_evals = gate_ev.evaluate(
-                            row,
-                            &pk.selectors,
-                            &pk.fixed,
-                            &self.instance_polys(),
-                            &self.advice_polys(),
-                        );
-
-                        // Add ∑ⱼ yⱼ⋅Gⱼ(acc[i]) to eᵢ
-                        *error += zip(gate_ys.iter(), row_evals.iter())
-                            .fold(C::Scalar::ZERO, |acc, (y, eval)| acc + *y * eval);
-                    }
-                    // eᵢ *= βᵢ⋅eᵢ
                     *error *= self.beta_poly()[row];
                 }
             });
 
-            // Sum all eᵢ
-            let folding_error = folding_errors.par_iter().sum::<C::Scalar>();
-
-            folding_error == self.error
+            let error = errors.iter().sum();
+            self.error == error
         };
-
-        // Check all linear constraints, which were ignored during folding
-        let linear_errors_ok = {
-            let mut linear_errors = vec![true; pk.num_usable_rows()];
-
-            parallelize(&mut linear_errors, |errors, start| {
-                let linear_constraints = pk.linear_constraints();
-
-                // Create a single evaluator for all linear constraints
-                let mut linear_gate_ev =
-                    RowEvaluator::new(linear_constraints, &self.advice_challenges());
-
-                for (i, error) in errors.iter_mut().enumerate() {
-                    let row = start + i;
-
-                    let row_evals = linear_gate_ev.evaluate(
-                        row,
-                        &pk.selectors,
-                        &pk.fixed,
-                        &self.instance_polys(),
-                        &self.advice_polys(),
-                    );
-
-                    // Check that all constraints evaluate to 0.
-                    *error = row_evals.iter().all(|eval| eval.is_zero_vartime());
-                }
-            });
-
-            linear_errors.par_iter().all(|row_ok| *row_ok)
-        };
-
-        // TODO(@adr1anh): Check lookups
 
         // TODO(@adr1anh): Maybe check permutations too?
 
-        commitments_ok & folding_errors_ok & linear_errors_ok
+        commitments_ok & folding_errors_ok
     }
 
-    fn advice_challenges(&self) -> &[Vec<C::Scalar>] {
+    pub fn error_vector(&self, pk: &ProvingKey<C>) -> Polynomial<C::Scalar, LagrangeCoeff> {
+        let mut ys_iter = self.ys.iter();
+        // Store βᵢ⋅eᵢ for each row i
+        let mut errors = lagrange_from_vec(vec![C::Scalar::ZERO; pk.num_rows]);
+
+        for (poly, y) in pk
+            .cs
+            .gates
+            .iter()
+            .flat_map(|gate| gate.polynomials())
+            .zip(ys_iter.by_ref())
+        {
+            let poly_evals = lagrange_from_vec(evaluate(
+                poly,
+                pk.num_rows,
+                1,
+                &pk.fixed,
+                self.advice_polys(),
+                self.instance_polys(),
+                self.advice_challenges(),
+            ));
+
+            // Add ∑ⱼ yⱼ⋅Gⱼ(acc[i]) to eᵢ
+            errors = errors + &(poly_evals * *y);
+        }
+
+        for (lookup, transcript) in zip(
+            pk.cs.lookups.iter(),
+            self.lookup_transcript.singles_transcript.iter(),
+        ) {
+            let r = self.lookup_transcript.r.unwrap();
+            let m = &transcript.m_poly;
+            let g = &transcript.g_poly;
+            let h = &transcript.h_poly;
+            {
+                let input_evals = lagrange_from_vec(evaluate_lc(
+                    &lookup.input_expressions,
+                    self.lookup_transcript.thetas.as_ref().unwrap(),
+                    pk.num_rows,
+                    1,
+                    &pk.fixed,
+                    self.advice_polys(),
+                    self.instance_polys(),
+                    self.advice_challenges(),
+                ));
+
+                let y_curr = *ys_iter.next().unwrap();
+
+                parallelize(&mut errors, |errors, start| {
+                    for (i, error) in errors.iter_mut().enumerate() {
+                        let row = start + i;
+                        *error += (g[row] * (r + input_evals[row]) - C::Scalar::ONE) * y_curr;
+                    }
+                });
+            }
+            
+            {
+                let table_evals = lagrange_from_vec(evaluate_lc(
+                    &lookup.table_expressions,
+                    self.lookup_transcript.thetas.as_ref().unwrap(),
+                    pk.num_rows,
+                    1,
+                    &pk.fixed,
+                    self.advice_polys(),
+                    self.instance_polys(),
+                    self.advice_challenges(),
+                ));
+
+                let y_curr = *ys_iter.next().unwrap();
+
+                parallelize(&mut errors, |errors, start| {
+                    for (i, error) in errors.iter_mut().enumerate() {
+                        let row = start + i;
+                        *error += (h[row] * (r + table_evals[row]) - m[row]) * y_curr;
+                    }
+                });
+            }
+        }
+
+        errors
+    }
+
+    fn advice_challenges(&self) -> &[C::Scalar] {
         &self.advice_transcript.challenges
     }
 

@@ -12,7 +12,7 @@ pub struct Queries {
     pub fixed: Vec<(usize, Rotation)>,
     pub instance: Vec<(usize, Rotation)>,
     pub advice: Vec<(usize, Rotation)>,
-    pub challenges: Vec<(usize, usize)>,
+    pub challenges: Vec<usize>,
 }
 
 impl Queries {
@@ -20,7 +20,7 @@ impl Queries {
     pub fn from_polys<F: Field>(polys: &[Expression<F>]) -> Self {
         let mut queried_selectors = BTreeSet::<usize>::new();
         let mut queried_fixed = BTreeSet::<(usize, Rotation)>::new();
-        let mut queried_challenges = BTreeSet::<(usize, usize)>::new();
+        let mut queried_challenges = BTreeSet::<usize>::new();
         let mut queried_instance = BTreeSet::<(usize, Rotation)>::new();
         let mut queried_advice = BTreeSet::<(usize, Rotation)>::new();
 
@@ -34,7 +34,7 @@ impl Queries {
                     queried_fixed.insert((v.column_index(), v.rotation()));
                 }
                 Expression::Challenge(v) => {
-                    queried_challenges.insert((v.index(), v.power() - 1));
+                    queried_challenges.insert(v.index());
                 }
                 Expression::Instance(v) => {
                     queried_instance.insert((v.column_index(), v.rotation()));
@@ -83,12 +83,7 @@ impl Queries {
                     (query.column_index(), query.rotation()),
                 ))
             },
-            &|query| {
-                QueriedExpression::Challenge(get_idx(
-                    &self.challenges,
-                    (query.index(), query.power() - 1),
-                ))
-            },
+            &|query| QueriedExpression::Challenge(get_idx(&self.challenges, query.index())),
             &|e| QueriedExpression::Negated(e.into()),
             &|e1, e2| QueriedExpression::Sum(e1.into(), e2.into()),
             &|e1, e2| QueriedExpression::Product(e1.into(), e2.into()),
@@ -97,10 +92,10 @@ impl Queries {
     }
 
     // Given a list of challenges with their powers, returns a list of all challenges
-    pub fn queried_challenges<F: Field>(&self, challenges: &[Vec<F>]) -> Vec<F> {
+    pub fn queried_challenges<F: Field>(&self, challenges: &[F]) -> Vec<F> {
         self.challenges
             .iter()
-            .map(|(index, row)| challenges[*index][*row])
+            .map(|index| challenges[*index])
             .collect()
     }
 }

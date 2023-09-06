@@ -1,5 +1,5 @@
 use core::num;
-use std::iter::zip;
+use std::{collections::BTreeSet, iter::zip};
 
 use ff::Field;
 
@@ -40,8 +40,8 @@ impl<F: Field> RowBooleanEvaluator<F> {
     /// evaluations of the given polynomials.
     pub fn new(
         polys: &[Expression<F>],
-        challenges_acc: &[Vec<F>],
-        challenges_new: &[Vec<F>],
+        challenges_acc: &[F],
+        challenges_new: &[F],
         polys_evals_buffer: Vec<EvaluatedFrom2<F>>,
     ) -> Self {
         debug_assert_eq!(polys.len(), polys_evals_buffer.len());
@@ -81,7 +81,7 @@ impl<F: Field> RowBooleanEvaluator<F> {
     pub fn evaluate_all_from_2(
         &mut self,
         row_idx: usize,
-        selectors: &[Vec<bool>],
+        selectors: &[BTreeSet<usize>],
         fixed: &[Polynomial<F, LagrangeCoeff>],
         instance: [&[Polynomial<F, LagrangeCoeff>]; 2],
         advice: [&[Polynomial<F, LagrangeCoeff>]; 2],
@@ -120,7 +120,7 @@ pub struct RowEvaluator<F: Field> {
 
 impl<F: Field> RowEvaluator<F> {
     // Prepares a `RowEvaluator` for the polynomial `polys`
-    pub fn new(polys: &[Expression<F>], challenges: &[Vec<F>]) -> Self {
+    pub fn new(polys: &[Expression<F>], challenges: &[F]) -> Self {
         let queries = Queries::from_polys(&polys);
 
         let queried_polys: Vec<_> = polys
@@ -143,7 +143,7 @@ impl<F: Field> RowEvaluator<F> {
     pub fn evaluate(
         &mut self,
         row_idx: usize,
-        selectors: &[Vec<bool>],
+        selectors: &[BTreeSet<usize>],
         fixed: &[Polynomial<F, LagrangeCoeff>],
         instance: &[Polynomial<F, LagrangeCoeff>],
         advice: &[Polynomial<F, LagrangeCoeff>],

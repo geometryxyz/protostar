@@ -883,3 +883,47 @@ pub fn evaluate<F: Field, B: Basis>(
     });
     values
 }
+/// Evaluate multiple expressions and return their linear-combination
+pub fn evaluate_lc<F: Field, B: Basis>(
+    expression: &[Expression<F>],
+    coefficients: &[F],
+    size: usize,
+    rot_scale: i32,
+    fixed: &[Polynomial<F, B>],
+    advice: &[Polynomial<F, B>],
+    instance: &[Polynomial<F, B>],
+    challenges: &[F],
+) -> Vec<F> {
+    let mut values = vec![F::ZERO; size];
+    let isize = size as i32;
+    parallelize(&mut values, |values, start| {
+        for (i, value) in values.iter_mut().enumerate() {
+            let idx = start + i;
+
+            for (coeff, expr) in coefficients.iter().zip(expression.iter()) {
+                *value += expr.evaluate(
+                    &|scalar| scalar,
+                    &|_| panic!("virtual selectors are removed during optimization"),
+                    &|query| {
+                        fixed[query.column_index]
+                            [get_rotation_idx(idx, query.rotation.0, rot_scale, isize)]
+                    },
+                    &|query| {
+                        advice[query.column_index]
+                            [get_rotation_idx(idx, query.rotation.0, rot_scale, isize)]
+                    },
+                    &|query| {
+                        instance[query.column_index]
+                            [get_rotation_idx(idx, query.rotation.0, rot_scale, isize)]
+                    },
+                    &|challenge| challenges[challenge.index()],
+                    &|a| -a,
+                    &|a, b| a + &b,
+                    &|a, b| a * b,
+                    &|a, scalar| a * scalar,
+                ) * coeff;
+            }
+        }
+    });
+    values
+}

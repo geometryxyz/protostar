@@ -42,7 +42,7 @@ impl<F: Field> Row<F> {
     pub fn populate_all(
         &mut self,
         row_idx: usize,
-        selectors: &[Vec<bool>],
+        selectors: &[BTreeSet<usize>],
         fixed: &[Polynomial<F, LagrangeCoeff>],
         instance: &[Polynomial<F, LagrangeCoeff>],
         advice: &[Polynomial<F, LagrangeCoeff>],
@@ -57,7 +57,7 @@ impl<F: Field> Row<F> {
     pub fn populate_all_evaluated(
         &mut self,
         row_idx: usize,
-        selectors: &[Vec<bool>],
+        selectors: &[BTreeSet<usize>],
         fixed: &[Polynomial<F, LagrangeCoeff>],
         instance: [&[Polynomial<F, LagrangeCoeff>]; 2],
         advice: [&[Polynomial<F, LagrangeCoeff>]; 2],
@@ -111,10 +111,10 @@ impl<F: Field> Row<F> {
     }
 
     /// Fetch the queried selectors.
-    fn populate_selectors(&mut self, row_idx: usize, columns: &[Vec<bool>]) {
+    fn populate_selectors(&mut self, row_idx: usize, columns: &[BTreeSet<usize>]) {
         for (row_value, column_idx) in self.selectors.iter_mut().zip(self.queries.selectors.iter())
         {
-            *row_value = if columns[*column_idx][row_idx] {
+            *row_value = if columns[*column_idx].contains(&row_idx) {
                 F::ONE
             } else {
                 F::ZERO
