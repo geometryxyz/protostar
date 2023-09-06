@@ -404,7 +404,7 @@ impl<F: Field> Assignment<F> for MockProver<F> {
     }
 
     fn query_instance(
-        &mut self,
+        &self,
         column: Column<Instance>,
         row: usize,
     ) -> Result<circuit::Value<F>, Error> {

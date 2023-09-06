@@ -90,7 +90,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         Ok(())
     }
 
-    fn query_instance(&mut self, _: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
+    fn query_instance(&self, _: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
         if !self.usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
         }

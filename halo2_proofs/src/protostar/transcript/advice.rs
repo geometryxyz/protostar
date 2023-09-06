@@ -278,7 +278,7 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
         // Do nothing
     }
 
-    fn query_instance(&mut self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
+    fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
         // TODO(@adr1anh): Compare with actual length of the instance column
         if !self.usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));

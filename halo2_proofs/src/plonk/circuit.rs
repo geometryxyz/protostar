@@ -652,7 +652,7 @@ pub trait Assignment<F: Field> {
     /// Queries the cell of an instance column at a particular absolute row.
     ///
     /// Returns the cell's value, if known.
-    fn query_instance(&mut self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error>;
+    fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error>;
 
     /// Assign an advice column value (witness)
     fn assign_advice<V, VR, A, AR>(
@@ -2234,6 +2234,7 @@ impl<F: Field> ConstraintSystem<F> {
 
     /// Compute the degree of the constraint system (the maximum degree of all
     /// constraints).
+    /// TODO(@adr1anh): Folding degree?
     pub fn degree(&self) -> usize {
         // The permutation argument will serve alongside the gates, so must be
         // accounted for.

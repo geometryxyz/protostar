@@ -38,11 +38,6 @@ pub struct ProvingKey<C: CurveAffine> {
     // selectors[col][row]
     // TODO(@adr1anh): Replace with a `BTreeMap` to save memory
     pub selectors: Vec<BTreeSet<usize>>,
-
-    // Permutation columns mapping each, where
-    // permutations[col][row] = sigma(col*num_rows + row)
-    // TODO(@adr1anh): maybe store as Vec<Vec<(usize,usize)>)
-    pub permutations: Vec<Vec<usize>>,
 }
 
 impl<C: CurveAffine> ProvingKey<C> {
@@ -101,17 +96,12 @@ impl<C: CurveAffine> ProvingKey<C> {
         //         .map(|poly| domain.lagrange_from_vec(poly)),
         // );
 
-        let permutations = assembly
-            .permutation
-            .build_permutations(num_rows, &cs.permutation);
-
         Ok(ProvingKey {
             num_rows,
             usable_rows: assembly.usable_rows,
             cs,
             fixed,
             selectors: assembly.selectors,
-            permutations,
         })
     }
 
@@ -214,8 +204,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         Ok(())
     }
 
-    fn query_instance(&mut self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
-        let column_index = column.index();
+    fn query_instance(&self, _: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
         if !self.usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
         }
@@ -227,8 +216,8 @@ impl<F: Field> Assignment<F> for Assembly<F> {
     fn assign_advice<V, VR, A, AR>(
         &mut self,
         _: A,
-        column: Column<Advice>,
-        row: usize,
+        _: Column<Advice>,
+        _: usize,
         _: V,
     ) -> Result<(), Error>
     where

@@ -187,11 +187,7 @@ where
             // Do nothing
         }
 
-        fn query_instance(
-            &mut self,
-            column: Column<Instance>,
-            row: usize,
-        ) -> Result<Value<F>, Error> {
+        fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
             if !self.usable_rows.contains(&row) {
                 return Err(Error::not_enough_rows_available(self.k));
             }
