@@ -44,11 +44,12 @@ const BETA_POLY_DEGREE: usize = 1;
 /// including commitments and verifier challenges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Accumulator<C: CurveAffine> {
-    instance_transcript: InstanceTranscript<C>,
-    advice_transcript: AdviceTranscript<C>,
-    lookup_transcript: LookupTranscipt<C>,
-    compressed_verifier_transcript: CompressedVerifierTranscript<C>,
+    pub instance_transcript: InstanceTranscript<C>,
+    pub advice_transcript: AdviceTranscript<C>,
+    pub lookup_transcript: LookupTranscipt<C>,
+    pub compressed_verifier_transcript: CompressedVerifierTranscript<C>,
 
+    pub y: C::Scalar,
     // Powers of a challenge y for taking a random linear-combination of all constraints.
     ys: Vec<C::Scalar>,
 
@@ -57,7 +58,7 @@ pub struct Accumulator<C: CurveAffine> {
     constraint_errors: Vec<C::Scalar>,
 
     // Error value for all constraints
-    error: C::Scalar,
+    pub error: C::Scalar,
 }
 
 impl<C: CurveAffine> Accumulator<C> {
@@ -85,6 +86,7 @@ impl<C: CurveAffine> Accumulator<C> {
             advice_transcript,
             lookup_transcript,
             compressed_verifier_transcript,
+            y,
             ys,
             constraint_errors,
             error: C::Scalar::ZERO,
@@ -320,6 +322,7 @@ impl<C: CurveAffine> Accumulator<C> {
         We flatten `gates_error_polys_evals` into `error_polys_evals`, and let `m = num_constraints`.
         The result is the list of error polynomial evaluations e₀(D₀'), …, eₘ₋₁(Dₘ₋₁')
         */
+        // We can skip the evaluation at 0 and 1, since they contain the lhs error at 0 and the rhs error at 1. The lhs would typically hold a freshly new accumulator where e = 0
         let error_polys_evals_from_2: Vec<_> = gates_error_polys_evals_from_2
             .into_iter()
             .flat_map(|poly| poly.into_iter())
@@ -327,6 +330,7 @@ impl<C: CurveAffine> Accumulator<C> {
             .collect();
 
         // Sanity checks
+        // All constraint errors should be the same everywhere
         debug_assert_eq!(error_polys_evals_from_2.len(), num_constraints);
         debug_assert_eq!(self.constraint_errors.len(), num_constraints);
         debug_assert_eq!(new.constraint_errors.len(), num_constraints);
@@ -335,6 +339,7 @@ impl<C: CurveAffine> Accumulator<C> {
         Precompute `LagrangeInterpolator` which containts the inverse Vandermonde matrices
         for computing a polynomial's coefficients from its evaluations.
         */
+        // The Vandermonde matrix allows to interpolate over a set of distinct points and returns the polynomial in coefficient form
         let interpolator = {
             let max_num_evals = error_polys_evals_from_2
                 .iter()
@@ -371,6 +376,7 @@ impl<C: CurveAffine> Accumulator<C> {
           d = `max_degree` + NUM_EXTRA_EVALUATIONS (for βᵢ(X)) + 1 (for yⱼ(X))
         We add 1 for the length.
         */
+        // Here we combine all error polynomials for each gate by linearly combining them
         let final_error_poly_len = error_polys.iter().map(|poly| poly.len()).max().unwrap() + 1;
 
         debug_assert_eq!(self.ys.len(), num_constraints);
@@ -395,6 +401,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 final_error_poly
             })
             // Compute sum e(X) = ∑ⱼ yⱼ(X)⋅eⱼ(X)
+            // This is the final error polynomial, we don't evaluate anything yet
             .fold(
                 vec![C::Scalar::ZERO; final_error_poly_len],
                 |mut final_error_poly, final_error_poly_j| {
@@ -412,6 +419,7 @@ impl<C: CurveAffine> Accumulator<C> {
          e(0) = e₀
          e(1) = ∑ᵢ eᵢ
         */
+        // TODO(@gnosed): I forgot why we are placing e_0 into e(0) and sum i of e_i into e(1)
         let final_error_poly_eval_0: C::Scalar = final_error_poly[0];
         let final_error_poly_eval_1: C::Scalar = final_error_poly.iter().sum();
 
@@ -441,6 +449,7 @@ impl<C: CurveAffine> Accumulator<C> {
         for coef in quotient_final_error_poly.iter() {
             let _ = transcript.write_scalar(*coef);
         }
+        println!("quotient_final {:?}", quotient_final_error_poly);
 
         // Get alpha challenge
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
@@ -453,6 +462,7 @@ impl<C: CurveAffine> Accumulator<C> {
         // Evaluation of e(X) = (1-X)X⋅e'(X) + (1-X)⋅e(0) + X⋅e(1) in α
         self.error = eval_polynomial(&final_error_poly, alpha);
 
+        // Corresponds to step 6 of the ProtoStar paper (updated 20.08)
         // fold challenges
         for (c_acc, c_new) in zip(self.challenges_iter_mut(), new.challenges_iter()) {
             *c_acc += alpha * (*c_new - *c_acc);

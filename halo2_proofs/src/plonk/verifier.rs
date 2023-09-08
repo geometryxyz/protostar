@@ -76,6 +76,8 @@ where
     // Hash verification key into transcript
     vk.hash_into(transcript)?;
 
+    // Verifier queries the instance
+    // No interpolation, PCS opening proof instead
     if V::QUERY_INSTANCE {
         for instance_commitments in instance_commitments.iter() {
             // Hash the instance (external) commitments into the transcript
@@ -83,7 +85,10 @@ where
                 transcript.common_point(*commitment)?
             }
         }
-    } else {
+    }
+    // For Protostar, assume this branch only
+    else {
+        // Here it loops over multiple instances of different proofs
         for instance in instances.iter() {
             for instance in instance.iter() {
                 for value in instance.iter() {

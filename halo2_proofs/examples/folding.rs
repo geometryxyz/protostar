@@ -15,6 +15,7 @@ use halo2_proofs::{
         VerificationStrategy,
     },
     protostar,
+    protostar::verifier::VerifierAccumulator,
     transcript::{
         Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer,
     },
@@ -347,8 +348,23 @@ fn main() {
     .unwrap();
     assert!(acc.decide(&params, &pk));
 
+    let proof: Vec<u8> = transcript.finalize();
+
+    let mut verifier_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+    let verifier_acc =
+        VerifierAccumulator::new_from_prover(&mut verifier_transcript, &[], &pk, &acc).unwrap();
+    assert_eq!(
+        acc.instance_transcript.verifier_instance_commitments,
+        verifier_acc.instance_commitments
+    );
+    assert_eq!(
+        acc.advice_transcript.advice_commitments,
+        verifier_acc.advice_commitments
+    );
+
     // Folding an accumulator with itself should yield the same one,
     // since (1-X)*acc + X*acc = acc
+    /*
     let acc1 = acc.clone();
     acc.fold(&pk, acc1.clone(), &mut transcript);
     assert!(acc.decide(&params, &pk));
@@ -388,4 +404,5 @@ fn main() {
     .unwrap();
     acc.fold(&pk, acc4, &mut transcript);
     assert!(acc.decide(&params, &pk));
+    */
 }

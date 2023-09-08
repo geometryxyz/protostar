@@ -29,7 +29,7 @@ pub struct ProvingKey<C: CurveAffine> {
     pub usable_rows: Range<usize>,
 
     // The circuit's unmodified constraint system
-    cs: ConstraintSystem<C::Scalar>,
+    pub cs: ConstraintSystem<C::Scalar>,
 
     folding_constraints: Vec<Vec<Expression<C::Scalar>>>,
     simple_selectors: Vec<Option<Selector>>,

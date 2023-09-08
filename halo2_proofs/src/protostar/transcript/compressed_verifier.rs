@@ -23,9 +23,9 @@ use halo2curves::CurveAffine;
 /// only allows for commitments of vectors of size n.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompressedVerifierTranscript<C: CurveAffine> {
-    beta_poly: Polynomial<C::Scalar, LagrangeCoeff>,
-    beta_commitment: C,
-    beta_blind: Blind<C::Scalar>,
+    pub beta_poly: Polynomial<C::Scalar, LagrangeCoeff>,
+    pub beta_commitment: C,
+    pub beta_blind: Blind<C::Scalar>,
 }
 
 /// Runs the final IOP protocol to generate beta,

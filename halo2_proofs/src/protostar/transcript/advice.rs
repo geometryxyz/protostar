@@ -143,6 +143,7 @@ pub fn create_advice_transcript<
         }
 
         // Compute commitments to advice column polynomials
+        // TODO(@gnosed): refactor commitment function
         let blinds: Vec<_> = advice_values
             .iter()
             .map(|_| Blind(C::Scalar::random(&mut rng)))

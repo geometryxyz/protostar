@@ -272,7 +272,6 @@ impl<C: CurveAffine> LookupTranscipt<C> {
                 .chain(std::iter::once(&mut transcript.h_poly))
         })
     }
-
     pub fn commitments_iter(&self) -> impl Iterator<Item = &C> {
         self.singles_transcript.iter().flat_map(|transcript| {
             std::iter::once(&transcript.m_commitment)

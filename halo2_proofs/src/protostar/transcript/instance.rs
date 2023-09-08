@@ -1,7 +1,7 @@
 use std::iter::zip;
 
 use group::Curve;
-use halo2curves::CurveAffine;
+use halo2curves::{CurveAffine, CurveExt};
 
 use crate::{
     plonk::{ConstraintSystem, Error},
@@ -17,6 +17,7 @@ pub struct InstanceTranscript<C: CurveAffine> {
     pub instance_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     pub instance_commitments: Option<Vec<C>>,
     pub instance_blinds: Option<Vec<Blind<C::Scalar>>>,
+    pub verifier_instance_commitments: Vec<C::Scalar>,
 }
 
 /// Generates `Polynomial`s from given `instance` values, and adds them to the transcript.
@@ -41,6 +42,8 @@ pub fn create_instance_transcript<
     // generate polys for instance columns
     // NOTE(@adr1anh): In the case where the verifier does not query the instance,
     // we do not need to create a Lagrange polynomial of size n.
+    let mut verifier_instance_commitments: Vec<C::Scalar> = Vec::with_capacity(instances.len());
+
     let instance_polys = instances
         .iter()
         .map(|values| {
@@ -56,6 +59,7 @@ pub fn create_instance_transcript<
                 //     transcript.common_scalar(*value)?;
                 // }
                 transcript.common_scalar(*value)?;
+                verifier_instance_commitments.push(*value);
                 *poly = *value;
             }
             Ok(poly)
@@ -86,6 +90,7 @@ pub fn create_instance_transcript<
         instance_polys,
         instance_commitments: None,
         instance_blinds: None,
+        verifier_instance_commitments,
     })
 }
 
