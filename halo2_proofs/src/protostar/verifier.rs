@@ -101,9 +101,12 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             *advice_commitment = transcript.read_point()?;
         }
 
-        assert_eq!(acc.advice_transcript.advice_commitments, advice_commitments);
+        assert_eq!(
+            acc.advice_transcript.advice_commitments, advice_commitments,
+            "verifier and prover advice transcripts are not equal"
+        );
 
-        let challenge = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+        // let challenge = *transcript.squeeze_challenge_scalar::<C::Scalar>();
 
         let challenge_degrees = pk.max_challenge_powers();
         // Array of challenges and their powers
@@ -155,10 +158,9 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             beta_commitment
         );
 
+        // FIXME: `y` is not the same as in the prover
         // Challenge for the RLC of all constraints (all gates and all lookups)
         let y = *transcript.squeeze_challenge_scalar::<C::Scalar>();
-        // assert_eq!(acc.y, y);
-        println!("{:?}", y);
         //
         // Get error commitments
         //
@@ -167,9 +169,10 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             *e_commitment = transcript.read_point()?;
         }
 
+        assert_eq!(e_commitments.len(), 0);
+
         // Get alpha challenge
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
-        println!("{:?}", alpha);
 
         Ok(VerifierAccumulator {
             instance_commitments,
