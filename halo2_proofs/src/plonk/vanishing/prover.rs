@@ -18,25 +18,25 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
-pub(in crate::plonk) struct Committed<C: CurveAffine> {
+pub(crate) struct Committed<C: CurveAffine> {
     random_poly: Polynomial<C::Scalar, Coeff>,
     random_blind: Blind<C::Scalar>,
 }
 
-pub(in crate::plonk) struct Constructed<C: CurveAffine> {
+pub(crate) struct Constructed<C: CurveAffine> {
     h_pieces: Vec<Polynomial<C::Scalar, Coeff>>,
     h_blinds: Vec<Blind<C::Scalar>>,
     committed: Committed<C>,
 }
 
-pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
+pub(crate) struct Evaluated<C: CurveAffine> {
     h_poly: Polynomial<C::Scalar, Coeff>,
     h_blind: Blind<C::Scalar>,
     committed: Committed<C>,
 }
 
 impl<C: CurveAffine> Argument<C> {
-    pub(in crate::plonk) fn commit<
+    pub(crate) fn commit<
         'params,
         P: ParamsProver<'params, C>,
         E: EncodedChallenge<C>,
@@ -89,7 +89,7 @@ impl<C: CurveAffine> Argument<C> {
 }
 
 impl<C: CurveAffine> Committed<C> {
-    pub(in crate::plonk) fn construct<
+    pub(crate) fn construct<
         'params,
         P: ParamsProver<'params, C>,
         E: EncodedChallenge<C>,
@@ -144,7 +144,7 @@ impl<C: CurveAffine> Committed<C> {
 }
 
 impl<C: CurveAffine> Constructed<C> {
-    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+    pub(crate) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
         x: ChallengeX<C>,
         xn: C::Scalar,
@@ -175,7 +175,7 @@ impl<C: CurveAffine> Constructed<C> {
 }
 
 impl<C: CurveAffine> Evaluated<C> {
-    pub(in crate::plonk) fn open(
+    pub(crate) fn open(
         &self,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = ProverQuery<'_, C>> + Clone {

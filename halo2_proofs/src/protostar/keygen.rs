@@ -2,10 +2,11 @@ use core::num;
 use std::{collections::BTreeSet, ops::Range};
 
 use ff::Field;
+use group::Curve;
 use halo2curves::CurveAffine;
 
 use crate::{
-    arithmetic::log2_ceil,
+    arithmetic::{log2_ceil, parallelize},
     circuit::{layouter::SyncDeps, Value},
     plonk::{
         circuit::FloorPlanner, lookup, permutation, Advice, AdviceQuery, Any, Assigned, Assignment,
@@ -13,8 +14,9 @@ use crate::{
         Instance, InstanceQuery, Selector,
     },
     poly::{
-        batch_invert_assigned, commitment::Params, empty_lagrange, empty_lagrange_assigned,
-        EvaluationDomain, LagrangeCoeff, Polynomial,
+        batch_invert_assigned,
+        commitment::{Blind, Params},
+        empty_lagrange, empty_lagrange_assigned, EvaluationDomain, LagrangeCoeff, Polynomial,
     },
 };
 
@@ -23,6 +25,7 @@ use super::error_check;
 /// Contains all fixed data for a circuit that is required to create a Protostar `Accumulator`
 #[derive(Debug)]
 pub struct ProvingKey<C: CurveAffine> {
+    pub domain: EvaluationDomain<C::Scalar>,
     // maximum number of rows in the trace (including blinding factors)
     pub num_rows: usize,
     // max active rows, without blinding
@@ -33,11 +36,16 @@ pub struct ProvingKey<C: CurveAffine> {
 
     // Fixed columns
     // fixed[col][row]
-    pub fixed: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    pub fixed_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    pub fixed_commitments: Vec<C>,
     // Selector columns as `bool`s
     // selectors[col][row]
     // TODO(@adr1anh): Replace with a `BTreeMap` to save memory
     pub selectors: Vec<BTreeSet<usize>>,
+    pub selectors_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    pub selectors_commitments: Vec<C>,
+
+    pub(crate) permutation_pk: permutation::ProvingKey<C>,
 }
 
 impl<C: CurveAffine> ProvingKey<C> {
@@ -61,6 +69,10 @@ impl<C: CurveAffine> ProvingKey<C> {
         let config = ConcreteCircuit::configure(&mut cs);
 
         let cs = cs;
+
+        let degree = cs.degree();
+
+        let domain = EvaluationDomain::new(degree as u32, k);
 
         // TODO(@adr1anh): Blinding will be different for Protostar
         if num_rows < cs.minimum_rows() {
@@ -86,7 +98,12 @@ impl<C: CurveAffine> ProvingKey<C> {
             cs.constants.clone(),
         )?;
 
-        let fixed = batch_invert_assigned(assembly.fixed);
+        let fixed_polys = batch_invert_assigned(assembly.fixed);
+
+        let fixed_commitments: Vec<_> = fixed_polys
+            .iter()
+            .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
+            .collect();
 
         // We don't want to compress selectors for our usecase,
         // let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
@@ -96,12 +113,38 @@ impl<C: CurveAffine> ProvingKey<C> {
         //         .map(|poly| domain.lagrange_from_vec(poly)),
         // );
 
+        let selectors_polys: Vec<_> = assembly
+            .selectors
+            .iter()
+            .map(|selector| {
+                let mut poly = empty_lagrange(num_rows);
+                for &i in selector {
+                    poly[i] = C::Scalar::ONE;
+                }
+                poly
+            })
+            .collect();
+
+        let selectors_commitments: Vec<_> = selectors_polys
+            .iter()
+            .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
+            .collect();
+
+        let permutation_pk = assembly
+            .permutation
+            .build_pk(params, &domain, cs.permutation());
+
         Ok(ProvingKey {
+            domain,
             num_rows,
             usable_rows: assembly.usable_rows,
             cs,
-            fixed,
+            fixed_polys,
+            fixed_commitments,
             selectors: assembly.selectors,
+            selectors_polys,
+            selectors_commitments,
+            permutation_pk,
         })
     }
 

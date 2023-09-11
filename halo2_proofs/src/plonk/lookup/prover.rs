@@ -72,11 +72,12 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         T: TranscriptWrite<C, E>,
     >(
         &self,
-        pk: &ProvingKey<C>,
         params: &P,
         domain: &EvaluationDomain<C::Scalar>,
+        blinding_factors: usize,
         theta: ChallengeTheta<C>,
         advice_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
+        selector_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         fixed_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         instance_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         challenges: &'a [C::Scalar],
@@ -92,10 +93,11 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             let compressed_expression = expressions
                 .iter()
                 .map(|expression| {
-                    pk.vk.domain.lagrange_from_vec(evaluate(
+                    domain.lagrange_from_vec(evaluate(
                         expression,
                         params.n() as usize,
                         1,
+                        selector_values,
                         fixed_values,
                         advice_values,
                         instance_values,
@@ -116,9 +118,9 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
 
         // Permute compressed (InputExpression, TableExpression) pair
         let (permuted_input_expression, permuted_table_expression) = permute_expression_pair(
-            pk,
             params,
             domain,
+            blinding_factors,
             &mut rng,
             &compressed_input_expression,
             &compressed_table_expression,
@@ -126,7 +128,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
 
         // Closure to construct commitment to vector of values
         let mut commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>| {
-            let poly = pk.vk.domain.lagrange_to_coeff(values.clone());
+            let poly = domain.lagrange_to_coeff(values.clone());
             let blind = Blind(C::Scalar::random(&mut rng));
             let commitment = params.commit_lagrange(values, blind).to_affine();
             (poly, blind, commitment)
@@ -341,11 +343,11 @@ impl<C: CurveAffine> Committed<C> {
 impl<C: CurveAffine> Evaluated<C> {
     pub(in crate::plonk) fn open<'a>(
         &'a self,
-        pk: &'a ProvingKey<C>,
+        domain: &EvaluationDomain<C::Scalar>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = ProverQuery<'a, C>> + Clone {
-        let x_inv = pk.vk.domain.rotate_omega(*x, Rotation::prev());
-        let x_next = pk.vk.domain.rotate_omega(*x, Rotation::next());
+        let x_inv = domain.rotate_omega(*x, Rotation::prev());
+        let x_next = domain.rotate_omega(*x, Rotation::next());
 
         iter::empty()
             // Open lookup product commitments at x
@@ -390,14 +392,13 @@ type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCo
 ///   that has the corresponding value in S'.
 /// This method returns (A', S') if no errors are encountered.
 fn permute_expression_pair<'params, C: CurveAffine, P: Params<'params, C>, R: RngCore>(
-    pk: &ProvingKey<C>,
     params: &P,
     domain: &EvaluationDomain<C::Scalar>,
+    blinding_factors: usize,
     mut rng: R,
     input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
 ) -> Result<ExpressionPair<C::Scalar>, Error> {
-    let blinding_factors = pk.vk.cs.blinding_factors();
     let usable_rows = params.n() as usize - (blinding_factors + 1);
 
     let mut permuted_input_expression: Vec<C::Scalar> = input_expression.to_vec();

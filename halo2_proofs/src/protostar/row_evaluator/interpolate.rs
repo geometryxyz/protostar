@@ -56,7 +56,7 @@ impl<F: Field> InverseVandermodeMatrix<F> {
                 .enumerate()
                 .filter(|&(k, _)| k != j)
                 .map(|a| a.1)
-                .zip(denoms.into_iter())
+                .zip(denoms.iter())
             {
                 product.resize(tmp.len() + 1, F::ZERO);
                 for ((a, b), product) in tmp

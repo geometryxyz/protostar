@@ -18,7 +18,6 @@ use super::{
     lookup, permutation, shuffle, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta,
     ChallengeX, ChallengeY, Error, Expression, ProvingKey,
 };
-use crate::circuit::layouter::SyncDeps;
 use crate::{
     arithmetic::{eval_polynomial, CurveAffine},
     circuit::Value,
@@ -29,6 +28,7 @@ use crate::{
         Basis, Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, ProverQuery,
     },
 };
+use crate::{circuit::layouter::SyncDeps, poly::Rotation};
 use crate::{
     poly::batch_invert_assigned,
     transcript::{EncodedChallenge, TranscriptWrite},
@@ -423,11 +423,12 @@ where
                 .iter()
                 .map(|lookup| {
                     lookup.commit_permuted(
-                        pk,
                         params,
                         domain,
+                        meta.blinding_factors(),
                         theta,
                         &advice.advice_polys,
+                        &[],
                         &pk.fixed_values,
                         &instance.instance_values,
                         &challenges,
@@ -452,7 +453,8 @@ where
         .map(|(instance, advice)| {
             pk.vk.cs.permutation.commit(
                 params,
-                pk,
+                domain,
+                &pk.vk.cs,
                 &pk.permutation,
                 &advice.advice_polys,
                 &pk.fixed_values,
@@ -487,12 +489,13 @@ where
                 .iter()
                 .map(|shuffle| {
                     shuffle.commit_product(
-                        pk,
                         params,
                         domain,
+                        meta.blinding_factors(),
                         theta,
                         gamma,
                         &advice.advice_polys,
+                        &[],
                         &pk.fixed_values,
                         &instance.instance_values,
                         &challenges,
@@ -555,6 +558,8 @@ where
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     let xn = x.pow(&[params.n() as u64, 0, 0, 0]);
+    let x_next = domain.rotate_omega(*x, Rotation::next());
+    let x_last = domain.rotate_omega(*x, Rotation(-((meta.blinding_factors() + 1) as i32)));
 
     if P::QUERY_INSTANCE {
         // Compute and hash instance evals for each circuit instance
@@ -620,7 +625,11 @@ where
     // Evaluate the permutations, if any, at omega^i x.
     let permutations: Vec<permutation::prover::Evaluated<Scheme::Curve>> = permutations
         .into_iter()
-        .map(|permutation| -> Result<_, _> { permutation.construct().evaluate(pk, x, transcript) })
+        .map(|permutation| -> Result<_, _> {
+            permutation
+                .construct()
+                .evaluate(domain, meta.blinding_factors(), x, transcript)
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     // Evaluate the lookups, if any, at omega^i x.
@@ -640,7 +649,7 @@ where
         .map(|shuffles| -> Result<Vec<_>, _> {
             shuffles
                 .into_iter()
-                .map(|p| p.evaluate(pk, x, transcript))
+                .map(|p| p.evaluate(domain, x, transcript))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -676,9 +685,19 @@ where
                             blind: advice.advice_blinds[column.index()],
                         }),
                 )
-                .chain(permutation.open(pk, x))
-                .chain(lookups.iter().flat_map(move |p| p.open(pk, x)).into_iter())
-                .chain(shuffles.iter().flat_map(move |p| p.open(pk, x)).into_iter())
+                .chain(permutation.open(x, x_next, x_last))
+                .chain(
+                    lookups
+                        .iter()
+                        .flat_map(move |p| p.open(domain, x))
+                        .into_iter(),
+                )
+                .chain(
+                    shuffles
+                        .iter()
+                        .flat_map(move |p| p.open(domain, x))
+                        .into_iter(),
+                )
         })
         .chain(
             pk.vk

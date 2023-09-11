@@ -81,7 +81,7 @@ pub(crate) fn create_lookup_transcript<
                 num_rows,
                 challenges,
                 &pk.selectors,
-                &pk.fixed,
+                &pk.fixed_polys,
                 instance,
                 advice,
             )
@@ -98,7 +98,7 @@ pub(crate) fn create_lookup_transcript<
                 num_rows,
                 challenges,
                 &pk.selectors,
-                &pk.fixed,
+                &pk.fixed_polys,
                 instance,
                 advice,
             )
@@ -144,7 +144,7 @@ pub(crate) fn create_lookup_transcript<
                 num_rows,
                 challenges,
                 &pk.selectors,
-                &pk.fixed,
+                &pk.fixed_polys,
                 instance,
                 advice,
                 &thetas,
@@ -178,7 +178,7 @@ pub(crate) fn create_lookup_transcript<
                 num_rows,
                 challenges,
                 &pk.selectors,
-                &pk.fixed,
+                &pk.fixed_polys,
                 instance,
                 advice,
                 m_poly,
@@ -240,6 +240,7 @@ pub(crate) fn create_lookup_transcript<
         singles_transcript,
     }
 }
+
 impl<C: CurveAffine> LookupTranscipt<C> {
     pub fn challenges_iter(&self) -> impl Iterator<Item = &C::Scalar> {
         self.thetas

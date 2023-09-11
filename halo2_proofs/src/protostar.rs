@@ -1,5 +1,6 @@
 //! Contains logic for handling halo2 circuits with Protostar
 
+mod decider;
 mod error_check;
 mod keygen;
 pub mod prover;

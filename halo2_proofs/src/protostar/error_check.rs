@@ -13,12 +13,7 @@ use rayon::prelude::{
 
 use crate::{
     arithmetic::{eval_polynomial, lagrange_interpolate, parallelize, powers},
-    plonk::{
-        self,
-        evaluation::{evaluate, evaluate_lc},
-        lookup::Argument,
-        Expression,
-    },
+    plonk::{self, lookup::Argument, Expression},
     poly::{
         self,
         commitment::{Blind, Params},
@@ -29,6 +24,10 @@ use crate::{
 };
 
 use super::{
+    decider::{
+        add_evaluated_expression, add_evaluated_lookup_input, add_evaluated_lookup_table,
+        evaluate_error,
+    },
     error_check::lookup::{error_poly_lookup_inputs, error_poly_lookup_tables},
     keygen::ProvingKey,
     row_evaluator::{
@@ -51,20 +50,20 @@ const BETA_POLY_DEGREE: usize = 1;
 /// including commitments and verifier challenges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Accumulator<C: CurveAffine> {
-    instance_transcript: InstanceTranscript<C>,
-    advice_transcript: AdviceTranscript<C>,
-    lookup_transcript: LookupTranscipt<C>,
-    compressed_verifier_transcript: CompressedVerifierTranscript<C>,
+    pub instance_transcript: InstanceTranscript<C>,
+    pub advice_transcript: AdviceTranscript<C>,
+    pub lookup_transcript: LookupTranscipt<C>,
+    pub compressed_verifier_transcript: CompressedVerifierTranscript<C>,
 
     // Powers of a challenge y for taking a random linear-combination of all constraints.
-    ys: Vec<C::Scalar>,
+    pub ys: Vec<C::Scalar>,
 
     // For each constraint of degree > 1, we cache its error polynomial evaluation here
     // so we can interpolate all of them individually.
     constraint_errors: Vec<C::Scalar>,
 
     // Error value for all constraints
-    error: C::Scalar,
+    pub error: C::Scalar,
 }
 
 impl<C: CurveAffine> Accumulator<C> {
@@ -241,7 +240,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 let row_error_polys_evals = gate_ev.evaluate_all_from_2(
                     row_idx,
                     &pk.selectors,
-                    &pk.fixed,
+                    &pk.fixed_polys,
                     [&self.instance_polys(), &new.instance_polys()],
                     [&self.advice_polys(), &new.advice_polys()],
                 );
@@ -282,7 +281,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 let inputs_error_poly_evals = error_poly_lookup_inputs(
                     pk.num_rows,
                     &pk.selectors,
-                    &pk.fixed,
+                    &pk.fixed_polys,
                     [&self.advice_challenges(), &new.advice_challenges()],
                     [&self.beta_poly(), &new.beta_poly()],
                     [&self.advice_polys(), &new.advice_polys()],
@@ -301,7 +300,7 @@ impl<C: CurveAffine> Accumulator<C> {
                 let tables_error_poly_evals = error_poly_lookup_tables(
                     pk.num_rows,
                     &pk.selectors,
-                    &pk.fixed,
+                    &pk.fixed_polys,
                     [&self.advice_challenges(), &new.advice_challenges()],
                     [&self.beta_poly(), &new.beta_poly()],
                     [&self.advice_polys(), &new.advice_polys()],
@@ -530,100 +529,55 @@ impl<C: CurveAffine> Accumulator<C> {
     }
 
     pub fn error_vector(&self, pk: &ProvingKey<C>) -> Polynomial<C::Scalar, LagrangeCoeff> {
-        let mut ys_iter = self.ys.iter();
-        // Store βᵢ⋅eᵢ for each row i
-        let mut errors = lagrange_from_vec(vec![C::Scalar::ZERO; pk.num_rows]);
-
-        for (poly, y) in pk
-            .cs
-            .gates
+        let lookup_m: Vec<_> = self
+            .lookup_transcript
+            .singles_transcript
             .iter()
-            .flat_map(|gate| gate.polynomials())
-            .zip(ys_iter.by_ref())
-        {
-            let poly_evals = lagrange_from_vec(evaluate(
-                poly,
-                pk.num_rows,
-                1,
-                &pk.fixed,
-                self.advice_polys(),
-                self.instance_polys(),
-                self.advice_challenges(),
-            ));
-
-            // Add ∑ⱼ yⱼ⋅Gⱼ(acc[i]) to eᵢ
-            errors = errors + &(poly_evals * *y);
-        }
-
-        for (lookup, transcript) in zip(
-            pk.cs.lookups.iter(),
-            self.lookup_transcript.singles_transcript.iter(),
-        ) {
-            let r = self.lookup_transcript.r.unwrap();
-            let m = &transcript.m_poly;
-            let g = &transcript.g_poly;
-            let h = &transcript.h_poly;
-            {
-                let input_evals = lagrange_from_vec(evaluate_lc(
-                    &lookup.input_expressions,
-                    self.lookup_transcript.thetas.as_ref().unwrap(),
-                    pk.num_rows,
-                    1,
-                    &pk.fixed,
-                    self.advice_polys(),
-                    self.instance_polys(),
-                    self.advice_challenges(),
-                ));
-
-                let y_curr = *ys_iter.next().unwrap();
-
-                parallelize(&mut errors, |errors, start| {
-                    for (i, error) in errors.iter_mut().enumerate() {
-                        let row = start + i;
-                        *error += (g[row] * (r + input_evals[row]) - C::Scalar::ONE) * y_curr;
-                    }
-                });
-            }
-            
-            {
-                let table_evals = lagrange_from_vec(evaluate_lc(
-                    &lookup.table_expressions,
-                    self.lookup_transcript.thetas.as_ref().unwrap(),
-                    pk.num_rows,
-                    1,
-                    &pk.fixed,
-                    self.advice_polys(),
-                    self.instance_polys(),
-                    self.advice_challenges(),
-                ));
-
-                let y_curr = *ys_iter.next().unwrap();
-
-                parallelize(&mut errors, |errors, start| {
-                    for (i, error) in errors.iter_mut().enumerate() {
-                        let row = start + i;
-                        *error += (h[row] * (r + table_evals[row]) - m[row]) * y_curr;
-                    }
-                });
-            }
-        }
-
-        errors
+            .map(|lookup| lookup.m_poly.clone())
+            .collect();
+        let lookup_g: Vec<_> = self
+            .lookup_transcript
+            .singles_transcript
+            .iter()
+            .map(|lookup| lookup.g_poly.clone())
+            .collect();
+        let lookup_h: Vec<_> = self
+            .lookup_transcript
+            .singles_transcript
+            .iter()
+            .map(|lookup| lookup.h_poly.clone())
+            .collect();
+        lagrange_from_vec(evaluate_error(
+            &pk.cs,
+            pk.num_rows,
+            1,
+            &pk.selectors_polys,
+            &pk.fixed_polys,
+            self.advice_polys(),
+            self.instance_polys(),
+            self.advice_challenges(),
+            &self.ys,
+            &self.lookup_transcript.r,
+            &self.lookup_transcript.thetas,
+            &lookup_m,
+            &lookup_g,
+            &lookup_h,
+        ))
     }
 
-    fn advice_challenges(&self) -> &[C::Scalar] {
+    pub fn advice_challenges(&self) -> &[C::Scalar] {
         &self.advice_transcript.challenges
     }
 
-    fn advice_polys(&self) -> &[Polynomial<C::Scalar, LagrangeCoeff>] {
+    pub fn advice_polys(&self) -> &[Polynomial<C::Scalar, LagrangeCoeff>] {
         &self.advice_transcript.advice_polys
     }
 
-    fn instance_polys(&self) -> &[Polynomial<C::Scalar, LagrangeCoeff>] {
+    pub fn instance_polys(&self) -> &[Polynomial<C::Scalar, LagrangeCoeff>] {
         &self.instance_transcript.instance_polys
     }
 
-    fn beta_poly(&self) -> &Polynomial<C::Scalar, LagrangeCoeff> {
+    pub fn beta_poly(&self) -> &Polynomial<C::Scalar, LagrangeCoeff> {
         &self.compressed_verifier_transcript.beta_poly()
     }
 

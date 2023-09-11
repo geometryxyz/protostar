@@ -5,7 +5,7 @@ use super::Argument;
 use crate::{
     arithmetic::CurveAffine,
     plonk::{Error, VerifyingKey},
-    poly::{commitment::MSM, Rotation, VerifierQuery},
+    poly::{commitment::MSM, EvaluationDomain, Rotation, VerifierQuery},
     transcript::{EncodedChallenge, TranscriptRead},
 };
 use ff::Field;

@@ -4,8 +4,9 @@ use ff::Field;
 
 use super::BETA_POLY_DEGREE;
 use crate::{
+    arithmetic::parallelize,
     plonk::Expression,
-    poly::{LagrangeCoeff, Polynomial},
+    poly::{Basis, LagrangeCoeff, Polynomial},
     protostar::row_evaluator::{
         evaluated_poly::EvaluatedFrom2, PolyBooleanEvaluator, RowBooleanEvaluator,
     },

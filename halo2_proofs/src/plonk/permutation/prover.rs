@@ -10,11 +10,12 @@ use super::super::{circuit::Any, ChallengeBeta, ChallengeGamma, ChallengeX};
 use super::{Argument, ProvingKey};
 use crate::{
     arithmetic::{eval_polynomial, parallelize, CurveAffine},
-    plonk::{self, Error},
+    plonk::{self, ConstraintSystem, Error},
     poly::{
         self,
         commitment::{Blind, Params},
-        Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, ProverQuery, Rotation,
+        Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, ProverQuery,
+        Rotation,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
@@ -43,7 +44,7 @@ pub(crate) struct Evaluated<C: CurveAffine> {
 }
 
 impl Argument {
-    pub(in crate::plonk) fn commit<
+    pub(crate) fn commit<
         'params,
         C: CurveAffine,
         P: Params<'params, C>,
@@ -53,7 +54,8 @@ impl Argument {
     >(
         &self,
         params: &P,
-        pk: &plonk::ProvingKey<C>,
+        domain: &EvaluationDomain<C::Scalar>,
+        cs: &ConstraintSystem<C::Scalar>,
         pkey: &ProvingKey<C>,
         advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
         fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
@@ -63,15 +65,14 @@ impl Argument {
         mut rng: R,
         transcript: &mut T,
     ) -> Result<Committed<C>, Error> {
-        let domain = &pk.vk.domain;
-
         // How many columns can be included in a single permutation polynomial?
         // We need to multiply by z(X) and (1 - (l_last(X) + l_blind(X))). This
         // will never underflow because of the requirement of at least a degree
         // 3 circuit for the permutation argument.
-        assert!(pk.vk.cs_degree >= 3);
-        let chunk_len = pk.vk.cs_degree - 2;
-        let blinding_factors = pk.vk.cs.blinding_factors();
+        let cs_degree = cs.degree();
+        assert!(cs_degree >= 3);
+        let chunk_len = cs_degree - 2;
+        let blinding_factors = cs.blinding_factors();
 
         // Each column gets its own delta power.
         let mut deltaomega = C::Scalar::ONE;
@@ -193,7 +194,7 @@ impl Argument {
 }
 
 impl<C: CurveAffine> Committed<C> {
-    pub(in crate::plonk) fn construct(self) -> Constructed<C> {
+    pub(crate) fn construct(self) -> Constructed<C> {
         Constructed {
             sets: self
                 .sets
@@ -208,7 +209,7 @@ impl<C: CurveAffine> Committed<C> {
 }
 
 impl<C: CurveAffine> super::ProvingKey<C> {
-    pub(in crate::plonk) fn open(
+    pub(crate) fn open(
         &self,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = ProverQuery<'_, C>> + Clone {
@@ -219,7 +220,7 @@ impl<C: CurveAffine> super::ProvingKey<C> {
         })
     }
 
-    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+    pub(crate) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         &self,
         x: ChallengeX<C>,
         transcript: &mut T,
@@ -234,15 +235,13 @@ impl<C: CurveAffine> super::ProvingKey<C> {
 }
 
 impl<C: CurveAffine> Constructed<C> {
-    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+    pub(crate) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        pk: &plonk::ProvingKey<C>,
+        domain: &EvaluationDomain<C::Scalar>,
+        blinding_factors: usize,
         x: ChallengeX<C>,
         transcript: &mut T,
     ) -> Result<Evaluated<C>, Error> {
-        let domain = &pk.vk.domain;
-        let blinding_factors = pk.vk.cs.blinding_factors();
-
         {
             let mut sets = self.sets.iter();
 
@@ -281,18 +280,12 @@ impl<C: CurveAffine> Constructed<C> {
 }
 
 impl<C: CurveAffine> Evaluated<C> {
-    pub(in crate::plonk) fn open<'a>(
-        &'a self,
-        pk: &'a plonk::ProvingKey<C>,
+    pub(crate) fn open(
+        &self,
         x: ChallengeX<C>,
-    ) -> impl Iterator<Item = ProverQuery<'a, C>> + Clone {
-        let blinding_factors = pk.vk.cs.blinding_factors();
-        let x_next = pk.vk.domain.rotate_omega(*x, Rotation::next());
-        let x_last = pk
-            .vk
-            .domain
-            .rotate_omega(*x, Rotation(-((blinding_factors + 1) as i32)));
-
+        x_next: C::Scalar,
+        x_last: C::Scalar,
+    ) -> impl Iterator<Item = ProverQuery<'_, C>> + Clone {
         iter::empty()
             .chain(self.constructed.sets.iter().flat_map(move |set| {
                 iter::empty()
