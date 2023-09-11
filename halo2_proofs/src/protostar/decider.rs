@@ -23,7 +23,7 @@ use rand_core::RngCore;
 
 use super::{Accumulator, ProvingKey};
 
-fn create_proof<
+pub fn create_proof<
     'params,
     Scheme: CommitmentScheme,
     P: Prover<'params, Scheme>,
