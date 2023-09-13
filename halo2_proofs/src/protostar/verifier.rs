@@ -31,6 +31,8 @@ use rayon::prelude::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
 
+const BETA_POLY_DEGREE: usize = 1;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifierAccumulator<C: CurveAffine> {
     pub instance_commitments: Vec<C::Scalar>,
@@ -65,11 +67,6 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             return Err(Error::InvalidInstances);
         }
 
-        // TODO(@gnosed): DOUBT, is that correct? can we read a point from transcript. if it was saved with common_point() interface
-        // let instance_commitments: Vec<Vec<C>> = vec![vec![]; instances.len()];
-
-        // let instance_commitments = vec![vec![]; instances.len()];
-
         let mut instance_commitments = vec![C::Scalar::ZERO; instances.len()];
 
         for instance_commitment in instance_commitments.iter_mut() {
@@ -91,125 +88,63 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         //
         // Get advice commitments and challenges
         //
-        // Hash the prover's advice commitments into the transcript and squeeze challenges
-        let mut advice_commitments = vec![C::identity(); pk.cs.num_advice_columns];
+        let num_proofs = instance_commitments.len();
+        let (advice_commitments, challenges) = {
+            let mut advice_commitments = vec![C::identity(); pk.cs.num_advice_columns];
+            let mut challenges = vec![C::Scalar::ZERO; pk.cs.num_challenges];
 
-        // FIXME: read challenges phases as in advice.rs
+            for current_phase in pk.cs.phases() {
+                    for (phase, commitment) in pk
+                        .cs
+                        .advice_column_phase
+                        .iter()
+                        .zip(advice_commitments.iter_mut())
+                    {
+                        if current_phase == *phase {
+                            *commitment = transcript.read_point()?;
+                        }
+                    }
+                for (phase, challenge) in pk.cs.challenge_phase.iter().zip(challenges.iter_mut()) {
+                    if current_phase == *phase {
+                        *challenge = *transcript.squeeze_challenge_scalar::<()>();
+                    }
+                }
+            }
+
+            (advice_commitments, challenges)
+        };
+        println!("AAAAA {:?}", advice_commitments);
+        println!("CCC {:?}", challenges);
+        // let mut advice_commitments = vec![C::identity(); pk.cs.num_advice_columns];
+
+        // FIXME: read advice commitments with phase
+
+        // for advice_commitment in advice_commitments.iter_mut() {
+        //     *advice_commitment = transcript.read_point()?;
+        // }
+
+        // let mut challenges = HashMap::with_capacity(pk.cs.num_challenges);
 
         // for current_phase in pk.cs.phases() {
-        // println!("current phase: {:?}", current_phase);
-        // witness.current_phase = current_phase;
-        // let column_indices = pk
-        //     .cs
-        //     .advice_column_phase
-        //     .iter()
-        //     .enumerate()
-        //     .filter_map(|(column_index, phase)| {
+        //     for (index, phase) in pk.cs.challenge_phase.iter().enumerate() {
         //         if current_phase == *phase {
-        //             Some(column_index)
-        //         } else {
-        //             None
+        //             challenges.insert(index, *transcript.squeeze_challenge_scalar::<()>());
         //         }
-        //     })
-        //     .collect::<BTreeSet<_>>();
-        // println!("column indices, {:?}", column_indices);
-        println!("pk.cs.num_advice_columns: {:?}", pk.cs.num_advice_columns);
-        for advice_commitment in advice_commitments.iter_mut() {
-            *advice_commitment = transcript.read_point()?;
-            println!("commitment {:?}", advice_commitment);
-            // println!(
-            //     "column indices {:?}, commitment {:?}",
-            //     column_indices, advice_commitment
-            // );
-        }
-
-        // Synthesize the circuit to obtain the witness and other information.
-        // ConcreteCircuit::FloorPlanner::synthesize(
-        //     &mut witness,
-        //     circuit,
-        //     config.clone(),
-        //     meta.constants.clone(),
-        // )?;
-
-        // let mut advice_values = batch_invert_assigned::<C::Scalar>(
-        //     witness
-        //         .advice
-        //         .iter()
-        //         .enumerate()
-        //         .filter_map(|(column_index, advice)| {
-        //             if column_indices.contains(&column_index) {
-        //                 Some(advice.clone())
-        //             } else {
-        //                 None
-        //             }
-        //         })
-        //         .collect(),
-        // );
-
-        // Add blinding factors to advice columns
-        // for advice_values in &mut advice_values {
-        //     for cell in &mut advice_values[unusable_rows_start..] {
-        //         *cell = C::Scalar::random(&mut rng);
         //     }
         // }
 
-        // Compute commitments to advice column polynomials
-        // TODO(@gnosed): refactor commitment function
-        // let blinds: Vec<_> = advice_values
-        //     .iter()
-        //     .map(|_| Blind(C::Scalar::random(&mut rng)))
-        //     .collect();
-        // let advice_commitments_projective: Vec<_> = advice_values
-        //     .iter()
-        //     .zip(blinds.iter())
-        //     .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-        //     .collect();
-        // let mut advice_commitments_affine =
-        //     vec![C::identity(); advice_commitments_projective.len()];
-        // C::CurveExt::batch_normalize(
-        //     &advice_commitments_projective,
-        //     &mut advice_commitments_affine,
-        // );
-        // let advice_commitments_affine = advice_commitments_affine;
-        // drop(advice_commitments_projective);
-
-        // for commitment in &advice_commitments_affine {
-        //     transcript.write_point(*commitment)?;
-        // }
-
-        // // Store advice columns in Assembly
-        // for (((column_index, advice_values), commitment), blind) in column_indices
-        //     .iter()
-        //     .zip(advice_values)
-        //     .zip(advice_commitments_affine)
-        //     .zip(blinds)
-        // {
-        //     advice_polys[*column_index] = advice_values;
-        //     advice_commitments[*column_index] = commitment;
-        //     advice_blinds[*column_index] = blind;
-        // }
-
-        // for (index, phase) in meta.challenge_phase.iter().enumerate() {
-        //     if current_phase == *phase {
-        //         let existing = witness
-        //             .challenges
-        //             .insert(index, *transcript.squeeze_challenge_scalar::<()>());
-        //         assert!(existing.is_none());
-        //     }
-        // }
-        // }
-        println!("verifier advice_commitments: {:?}", advice_commitments);
-
-        // let challenge = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+        // let challenges = (0..pk.cs.num_challenges)
+        //     .map(|index| challenges.remove(&index).unwrap())
+        // println!("VERIFIER challenges 1 {:?}", challenges);
 
         let challenge_degrees = pk.max_challenge_powers();
-        // Array of challenges and their powers
-        // challenges[i][d] = challenge_i^{d+1}
-        let challenges = vec![C::Scalar::ZERO; pk.cs.num_challenges]
+        // println!("challenge degrees {:?}", challenge_degrees);
+        let challenges = challenges
             .into_iter()
             .zip(challenge_degrees)
             .map(|(c, d)| powers(c).skip(1).take(d).collect::<Vec<_>>())
             .collect::<Vec<_>>();
+        // println!("challenges 2 {:?}", challenges);
         //
         // Get lookup commitments to m(x), g(x) and h(x) polys
         //
@@ -234,6 +169,7 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         //
         // Get beta commitment
         //
+        let _beta = *transcript.squeeze_challenge_scalar::<C::Scalar>();
         let beta_commitment = transcript.read_point()?;
 
         // FIXME: `y` is not the same as in the prover
@@ -266,19 +202,33 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         /*
         Compute the number of constraints in each gate as well as the total number of constraints in all gates.
         */
-        let num_constraints = pk.num_folding_constraints();
+        let gates_error_polys_num_evals: Vec<Vec<usize>> = pk
+            .folding_constraints()
+            .iter()
+            .map(|polys| {
+                polys
+                    .iter()
+                    .map(|poly| poly.folding_degree() + BETA_POLY_DEGREE + 1)
+                    .collect()
+            })
+            .collect();
 
+        let max_gate_num_evals = gates_error_polys_num_evals
+            .iter()
+            .flat_map(|gates_num_evals| gates_num_evals.iter())
+            .max()
+            .unwrap();
         //
         // Get error commitments
+        let final_error_poly_len = max_gate_num_evals + 1;
+        // Prover doesn't send the first two coefficient since Verifier already know e(0) and e(1)
+        let quotient_final_error_poly_len = final_error_poly_len - 2;
 
-        println!("verifier num_constraints {:?}", num_constraints);
-        let mut e_commitments = vec![C::Scalar::ZERO; num_constraints];
+        let mut e_commitments = vec![C::Scalar::ZERO; quotient_final_error_poly_len];
         for e_commitment in e_commitments.iter_mut() {
             *e_commitment = transcript.read_scalar().unwrap();
         }
-
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
-        println!("verifier alpha: {:?}", alpha);
 
         // eval e'(alpha), then eval e(alpha) = (1-alpha)*alpha*e'(alpha) + (1-alpha)*e(0) + alpha*e(1)
         let quotient_final_error_poly = eval_polynomial(&e_commitments, alpha);
@@ -564,6 +514,10 @@ mod tests {
             "V and P Advice Transcripts NOT EQUAL"
         );
         assert_eq!(
+            p_acc.advice_transcript.challenges, v_acc.challenges,
+            "V and P Advice Challenges NOT EQUAL"
+        );
+        assert_eq!(
             p_acc.lookup_transcript.singles_transcript.len(),
             v_acc.m_commitments.len(),
             "V and P m(x) Commitments NOT EQUAL"
@@ -582,6 +536,7 @@ mod tests {
             p_acc.compressed_verifier_transcript.beta_commitment, v_acc.beta_commitment,
             "V and P Beta Commitment NOT EQUAL"
         );
+        assert_eq!(p_acc.y, v_acc.y, "V and P Y challenge NOT EQUAL");
     }
 
     #[test]
@@ -665,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn test_folding_two_verifiers() {
+    fn test_two_verifier_acc_folding() {
         let mut rng: OsRng = OsRng;
 
         const W: usize = 4;

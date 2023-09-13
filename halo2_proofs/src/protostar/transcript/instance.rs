@@ -59,6 +59,7 @@ pub fn create_instance_transcript<
                 //     transcript.common_scalar(*value)?;
                 // }
                 transcript.common_scalar(*value)?;
+                println!("instance value {:?} ", *value);
                 verifier_instance_commitments.push(*value);
                 *poly = *value;
             }

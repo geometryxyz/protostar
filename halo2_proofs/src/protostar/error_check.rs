@@ -1,3 +1,4 @@
+use core::num;
 use std::{
     collections::BTreeMap,
     iter::zip,
@@ -144,6 +145,7 @@ impl<C: CurveAffine> Accumulator<C> {
                     .collect()
             })
             .collect();
+        println!("gates_error_polys_num_evals {:?}", gates_error_polys_num_evals);
 
         /*
         For each gate, we allocate a buffer for storing running sum of the evaluation e₀(X), …, eₘ₋₁(X).
@@ -181,6 +183,8 @@ impl<C: CurveAffine> Accumulator<C> {
             .flat_map(|gates_num_evals| gates_num_evals.iter())
             .max()
             .unwrap();
+
+        println!("max_gate_num_evals {:?}", max_gate_num_evals);
 
         /*
         A `GateEvaluator` pre-processes a gate's polynomials for more efficient evaluation.
@@ -378,9 +382,12 @@ impl<C: CurveAffine> Accumulator<C> {
         */
         // Here we combine all error polynomials for each gate by linearly combining them
         let final_error_poly_len = error_polys.iter().map(|poly| poly.len()).max().unwrap() + 1;
+        println!("final_error_poly_len from error_polys {:?}", final_error_poly_len);
 
         debug_assert_eq!(self.ys.len(), num_constraints);
         debug_assert_eq!(new.ys.len(), num_constraints);
+
+        println!("prover num_constraints {:?}", num_constraints);
 
         let final_error_poly = error_polys
             .iter()
@@ -446,15 +453,22 @@ impl<C: CurveAffine> Accumulator<C> {
 
             quotient_by_boolean_vanishing(&pre_quotient_poly)
         };
+        println!(
+            "Prover quotient final error_poly length {:?}",
+            quotient_final_error_poly.len()
+        );
         for coef in quotient_final_error_poly.iter() {
             let _ = transcript.write_scalar(*coef);
+            println!("coeff quotient_final {:?}", coef);
         }
+        println!("final error_poly {:?}", final_error_poly);
+        println!("final error_poly.len() {:?}", final_error_poly.len());
         println!("quotient_final {:?}", quotient_final_error_poly);
         println!("quotient_final.len() {:?}", quotient_final_error_poly.len());
 
         // Get alpha challenge
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
-        println!("prover alpha: {:?}",alpha);
+        println!("prover alpha: {:?}", alpha);
 
         // Cache the constraint errors eⱼ(α), for use in the next folding iteration
         for (j, error_poly_j) in error_polys.iter().enumerate() {

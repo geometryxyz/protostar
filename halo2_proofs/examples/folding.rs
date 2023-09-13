@@ -351,11 +351,11 @@ fn main() {
 
     // Folding an accumulator with itself should yield the same one,
     // since (1-X)*acc + X*acc = acc
-    // let acc1 = acc.clone();
+    let acc1 = acc.clone();
 
-    // acc.fold(&pk, acc1.clone(), &mut transcript);
-    // assert!(acc.decide(&params, &pk));
-    // assert_eq!(acc, acc1);
+    acc.fold(&pk, acc1.clone(), &mut transcript);
+    assert!(acc.decide(&params, &pk));
+    assert_eq!(acc, acc1);
 
     let acc2 = protostar::prover::create_accumulator(
         &params,
@@ -366,13 +366,7 @@ fn main() {
         &mut transcript,
     )
     .unwrap();
-    let proof: Vec<u8> = transcript.finalize();
 
-    let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
-    let _v_acc = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk, &acc).unwrap();
-    let _v_acc2 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk, &acc2).unwrap();
-
-    /*
     acc.fold(&pk, acc2, &mut transcript);
     assert!(acc.decide(&params, &pk));
 
@@ -398,5 +392,4 @@ fn main() {
     .unwrap();
     acc.fold(&pk, acc4, &mut transcript);
     assert!(acc.decide(&params, &pk));
-    */
 }
