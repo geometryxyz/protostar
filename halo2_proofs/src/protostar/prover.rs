@@ -78,7 +78,6 @@ pub fn create_accumulator<
 
     // Challenge for the RLC of all constraints (all gates and all lookups)
     let y = *transcript.squeeze_challenge_scalar::<C::Scalar>();
-        println!("PROVER Y {:?}", y);
 
     Ok(Accumulator::new(
         pk,

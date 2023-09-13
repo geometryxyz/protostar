@@ -88,22 +88,21 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         //
         // Get advice commitments and challenges
         //
-        let num_proofs = instance_commitments.len();
         let (advice_commitments, challenges) = {
             let mut advice_commitments = vec![C::identity(); pk.cs.num_advice_columns];
             let mut challenges = vec![C::Scalar::ZERO; pk.cs.num_challenges];
 
             for current_phase in pk.cs.phases() {
-                    for (phase, commitment) in pk
-                        .cs
-                        .advice_column_phase
-                        .iter()
-                        .zip(advice_commitments.iter_mut())
-                    {
-                        if current_phase == *phase {
-                            *commitment = transcript.read_point()?;
-                        }
+                for (phase, commitment) in pk
+                    .cs
+                    .advice_column_phase
+                    .iter()
+                    .zip(advice_commitments.iter_mut())
+                {
+                    if current_phase == *phase {
+                        *commitment = transcript.read_point()?;
                     }
+                }
                 for (phase, challenge) in pk.cs.challenge_phase.iter().zip(challenges.iter_mut()) {
                     if current_phase == *phase {
                         *challenge = *transcript.squeeze_challenge_scalar::<()>();
@@ -113,38 +112,14 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
 
             (advice_commitments, challenges)
         };
-        println!("AAAAA {:?}", advice_commitments);
-        println!("CCC {:?}", challenges);
-        // let mut advice_commitments = vec![C::identity(); pk.cs.num_advice_columns];
-
-        // FIXME: read advice commitments with phase
-
-        // for advice_commitment in advice_commitments.iter_mut() {
-        //     *advice_commitment = transcript.read_point()?;
-        // }
-
-        // let mut challenges = HashMap::with_capacity(pk.cs.num_challenges);
-
-        // for current_phase in pk.cs.phases() {
-        //     for (index, phase) in pk.cs.challenge_phase.iter().enumerate() {
-        //         if current_phase == *phase {
-        //             challenges.insert(index, *transcript.squeeze_challenge_scalar::<()>());
-        //         }
-        //     }
-        // }
-
-        // let challenges = (0..pk.cs.num_challenges)
-        //     .map(|index| challenges.remove(&index).unwrap())
-        // println!("VERIFIER challenges 1 {:?}", challenges);
 
         let challenge_degrees = pk.max_challenge_powers();
-        // println!("challenge degrees {:?}", challenge_degrees);
+
         let challenges = challenges
             .into_iter()
             .zip(challenge_degrees)
             .map(|(c, d)| powers(c).skip(1).take(d).collect::<Vec<_>>())
             .collect::<Vec<_>>();
-        // println!("challenges 2 {:?}", challenges);
         //
         // Get lookup commitments to m(x), g(x) and h(x) polys
         //
@@ -155,7 +130,6 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         for m_commitment in m_commitments.iter_mut() {
             *m_commitment = transcript.read_point()?;
         }
-        // TODO(@gnosed): basic length check atm, verify both vectors instead for all lookups commitments
 
         let mut g_commitments = vec![C::identity(); num_lookups];
         for g_commitment in g_commitments.iter_mut() {
@@ -172,7 +146,6 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         let _beta = *transcript.squeeze_challenge_scalar::<C::Scalar>();
         let beta_commitment = transcript.read_point()?;
 
-        // FIXME: `y` is not the same as in the prover
         // Challenge for the RLC of all constraints (all gates and all lookups)
         let y = *transcript.squeeze_challenge_scalar::<C::Scalar>();
 
@@ -199,9 +172,9 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         pk: &ProvingKey<C>,
         transcript: &mut T,
     ) {
-        /*
-        Compute the number of constraints in each gate as well as the total number of constraints in all gates.
-        */
+        //
+        // Compute the number of constraints in each gate as well as the total number of constraints in all gates.
+        //
         let gates_error_polys_num_evals: Vec<Vec<usize>> = pk
             .folding_constraints()
             .iter()
@@ -220,6 +193,7 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             .unwrap();
         //
         // Get error commitments
+        //
         let final_error_poly_len = max_gate_num_evals + 1;
         // Prover doesn't send the first two coefficient since Verifier already know e(0) and e(1)
         let quotient_final_error_poly_len = final_error_poly_len - 2;
@@ -229,6 +203,7 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             *e_commitment = transcript.read_scalar().unwrap();
         }
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+        println!("verifier alpha: {:?}", alpha);
 
         // eval e'(alpha), then eval e(alpha) = (1-alpha)*alpha*e'(alpha) + (1-alpha)*e(0) + alpha*e(1)
         let quotient_final_error_poly = eval_polynomial(&e_commitments, alpha);
@@ -236,6 +211,43 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             + (C::Scalar::ONE - alpha) * self.error
             + alpha * acc1.error;
         self.error = final_error;
+
+        for (c0, c1) in zip(
+            self.advice_commitments.iter_mut(),
+            acc1.advice_commitments.iter(),
+        ) {
+            *c0 = ((*c1 - *c0) * alpha + *c0).to_affine();
+        }
+
+        for (c0, c1) in zip(
+            self.m_commitments.iter_mut(),
+            acc1.m_commitments.iter(),
+        ) {
+            *c0 = ((*c1 - *c0) * alpha + *c0).to_affine();
+        }
+
+        for (c0, c1) in zip(
+            self.g_commitments.iter_mut(),
+            acc1.g_commitments.iter(),
+        ) {
+            *c0 = ((*c1 - *c0) * alpha + *c0).to_affine();
+        }
+
+        for (c0, c1) in zip(
+            self.h_commitments.iter_mut(),
+            acc1.h_commitments.iter(),
+        ) {
+            *c0 = ((*c1 - *c0) * alpha + *c0).to_affine();
+        }
+
+        for (cs0, cs1) in zip(self.challenges.iter_mut(), acc1.challenges.iter()) {
+            for (c0, c1) in zip(cs0, cs1) {
+                *c0 = (*c1 - *c0) * alpha + *c0;
+            }
+        }
+
+        self.beta_commitment =
+            ((acc1.beta_commitment - self.beta_commitment) * alpha + self.beta_commitment).to_affine()
     }
 }
 
@@ -504,7 +516,6 @@ mod tests {
         v_acc: VerifierAccumulator<C>,
         p_acc: Accumulator<C>,
     ) {
-        // Check acc0 and v_acc0 transcripts
         assert_eq!(
             p_acc.instance_transcript.verifier_instance_commitments, v_acc.instance_commitments,
             "V and P Instance Transcripts NOT EQUAL"
@@ -681,7 +692,7 @@ mod tests {
         println!("---Check V and P #1---");
         check_v_and_p_transcripts(v_acc1, acc1);
         println!("---Check V and P fold #1 into #0---");
-        println!("V error: {:?}, P error {:?}", v_acc0.error, acc0.error);
-        // check_v_and_p_transcripts(v_acc0, acc0);
+        assert_eq!(v_acc0.error, acc0.error);
+        check_v_and_p_transcripts(v_acc0, acc0);
     }
 }
