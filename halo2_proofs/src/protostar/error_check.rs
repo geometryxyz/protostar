@@ -51,7 +51,7 @@ pub struct Accumulator<C: CurveAffine> {
 
     pub y: C::Scalar,
     // Powers of a challenge y for taking a random linear-combination of all constraints.
-    ys: Vec<C::Scalar>,
+    pub ys: Vec<C::Scalar>,
 
     // For each constraint of degree > 1, we cache its error polynomial evaluation here
     // so we can interpolate all of them individually.
@@ -450,9 +450,11 @@ impl<C: CurveAffine> Accumulator<C> {
             let _ = transcript.write_scalar(*coef);
         }
         println!("quotient_final {:?}", quotient_final_error_poly);
+        println!("quotient_final.len() {:?}", quotient_final_error_poly.len());
 
         // Get alpha challenge
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+        println!("prover alpha: {:?}",alpha);
 
         // Cache the constraint errors eⱼ(α), for use in the next folding iteration
         for (j, error_poly_j) in error_polys.iter().enumerate() {

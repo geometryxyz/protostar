@@ -143,7 +143,6 @@ pub fn create_advice_transcript<
         }
 
         // Compute commitments to advice column polynomials
-        // TODO(@gnosed): refactor commitment function
         let blinds: Vec<_> = advice_values
             .iter()
             .map(|_| Blind(C::Scalar::random(&mut rng)))
@@ -164,6 +163,7 @@ pub fn create_advice_transcript<
 
         for commitment in &advice_commitments_affine {
             transcript.write_point(*commitment)?;
+            println!("current phase {:?}, column indices {:?}, commitment {:?}",current_phase, column_indices, commitment);
         }
 
         // Store advice columns in Assembly
@@ -200,6 +200,8 @@ pub fn create_advice_transcript<
         .map(|(c, d)| powers(c).skip(1).take(d).collect::<Vec<_>>())
         .collect::<Vec<_>>();
 
+    println!("Prover advice_commitments.len() {:?}",advice_commitments.len());
+    println!("advice_commitments: {:?}",advice_commitments);
     Ok(AdviceTranscript {
         challenges,
         advice_polys,
