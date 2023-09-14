@@ -203,7 +203,6 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             *e_commitment = transcript.read_scalar().unwrap();
         }
         let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
-        println!("verifier alpha: {:?}", alpha);
 
         // eval e'(alpha), then eval e(alpha) = (1-alpha)*alpha*e'(alpha) + (1-alpha)*e(0) + alpha*e(1)
         let quotient_final_error_poly = eval_polynomial(&e_commitments, alpha);
@@ -212,42 +211,38 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             + alpha * acc1.error;
         self.error = final_error;
 
-        for (c0, c1) in zip(
-            self.advice_commitments.iter_mut(),
-            acc1.advice_commitments.iter(),
+        // Fold all commitments
+        fn fold_commitments<C: CurveAffine>(
+            self_commitments: &mut Vec<C>,
+            acc1_commitments: &Vec<C>,
+            alpha: C::Scalar,
         ) {
-            *c0 = ((*c1 - *c0) * alpha + *c0).to_affine();
-        }
-
-        for (c0, c1) in zip(
-            self.m_commitments.iter_mut(),
-            acc1.m_commitments.iter(),
-        ) {
-            *c0 = ((*c1 - *c0) * alpha + *c0).to_affine();
-        }
-
-        for (c0, c1) in zip(
-            self.g_commitments.iter_mut(),
-            acc1.g_commitments.iter(),
-        ) {
-            *c0 = ((*c1 - *c0) * alpha + *c0).to_affine();
-        }
-
-        for (c0, c1) in zip(
-            self.h_commitments.iter_mut(),
-            acc1.h_commitments.iter(),
-        ) {
-            *c0 = ((*c1 - *c0) * alpha + *c0).to_affine();
-        }
-
-        for (cs0, cs1) in zip(self.challenges.iter_mut(), acc1.challenges.iter()) {
-            for (c0, c1) in zip(cs0, cs1) {
-                *c0 = (*c1 - *c0) * alpha + *c0;
+            for (self_c, acc1_c) in zip(self_commitments.iter_mut(), acc1_commitments.iter()) {
+                *self_c = ((*acc1_c - *self_c) * alpha + *self_c).to_affine();
             }
         }
 
-        self.beta_commitment =
-            ((acc1.beta_commitment - self.beta_commitment) * alpha + self.beta_commitment).to_affine()
+        fold_commitments(
+            &mut self.advice_commitments,
+            &acc1.advice_commitments,
+            alpha,
+        );
+        fold_commitments(&mut self.m_commitments, &acc1.m_commitments, alpha);
+        fold_commitments(&mut self.g_commitments, &acc1.g_commitments, alpha);
+        fold_commitments(&mut self.h_commitments, &acc1.h_commitments, alpha);
+
+        self.beta_commitment = ((acc1.beta_commitment - self.beta_commitment) * alpha
+            + self.beta_commitment)
+            .to_affine();
+
+        // Fold all challenges
+        for (self_challenges, acc1_challenges) in
+            zip(self.challenges.iter_mut(), acc1.challenges.iter())
+        {
+            for (self_c, acc1_c) in zip(self_challenges, acc1_challenges) {
+                *self_c = (*acc1_c - *self_c) * alpha + *self_c;
+            }
+        }
     }
 }
 
@@ -548,6 +543,7 @@ mod tests {
             "V and P Beta Commitment NOT EQUAL"
         );
         assert_eq!(p_acc.y, v_acc.y, "V and P Y challenge NOT EQUAL");
+        assert_eq!(p_acc.error, v_acc.error, "V and P Error NOT EQUAL");
     }
 
     #[test]
@@ -646,7 +642,6 @@ mod tests {
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         let pk = protostar::ProvingKey::new(&params, &circuit0).unwrap();
 
-        println!("---Create Accumulator #0---");
         let mut acc0 = protostar::prover::create_accumulator(
             &params,
             &pk,
@@ -656,7 +651,6 @@ mod tests {
             &mut transcript,
         )
         .unwrap();
-        println!("---Create Accumulator #1---");
         let acc1 = protostar::prover::create_accumulator(
             &params,
             &pk,
@@ -666,33 +660,27 @@ mod tests {
             &mut transcript,
         )
         .unwrap();
+
         let acc0_old = acc0.clone();
 
-        println!("---Fold Accumulator #1 into #0---");
         acc0.fold(&pk, acc1.clone(), &mut transcript);
 
-        println!("---Finalize Transcript---");
         let proof: Vec<u8> = transcript.finalize();
-
-        println!("---Create Verifier Transcript---");
         let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
 
-        println!("---Create Verifier Accumulator #0---");
         let mut v_acc0 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
-
-        println!("---Create Verifier Accumulator #1---");
         let v_acc1 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
-
-        println!("---Create Folded Verifier Accumulator #1 into #0---");
         let v_acc0_old = v_acc0.clone();
+
         v_acc0.fold(&v_acc1.clone(), &pk, &mut v_transcript);
 
-        println!("---Check V and P #0---");
         check_v_and_p_transcripts(v_acc0_old, acc0_old);
-        println!("---Check V and P #1---");
         check_v_and_p_transcripts(v_acc1, acc1);
-        println!("---Check V and P fold #1 into #0---");
-        assert_eq!(v_acc0.error, acc0.error);
         check_v_and_p_transcripts(v_acc0, acc0);
+    }
+
+    #[test]
+    fn test_scroll_zkevm_keccak_circuit(){
+
     }
 }
