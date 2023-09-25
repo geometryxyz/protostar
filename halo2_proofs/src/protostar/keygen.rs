@@ -20,8 +20,6 @@ use crate::{
     },
 };
 
-use super::error_check;
-
 /// Contains all fixed data for a circuit that is required to create a Protostar `Accumulator`
 #[derive(Debug)]
 pub struct ProvingKey<C: CurveAffine> {
@@ -148,31 +146,33 @@ impl<C: CurveAffine> ProvingKey<C> {
         })
     }
 
-    // /// Maximum degree over all gates in the circuit
-    // pub fn max_degree(&self) -> usize {
-    //     let mut max_degree = 0;
+    /// Maximum degree over all gates in the circuit
+    pub fn max_folding_constraints_degree(&self) -> usize {
+        let mut max_degree = 0;
 
-    //     // Get maximum degree over all gate polynomials
-    //     for gate in &self.cs.gates {
-    //         for poly in gate.polynomials() {
-    //             max_degree = std::cmp::max(max_degree, poly.folding_degree());
-    //         }
-    //     }
+        // Get maximum degree over all gate polynomials
+        for gate in &self.cs.gates {
+            for poly in gate.polynomials() {
+                max_degree = std::cmp::max(max_degree, poly.folding_degree());
+            }
+        }
 
-    //     // Get maximum of all lookup constraints.
-    //     // Add 1 to account for theta challenge
-    //     // Add 1 to account for h/g
-    //     for lookup in &self.cs.lookups {
-    //         for poly in lookup
-    //             .input_expressions
-    //             .iter()
-    //             .chain(lookup.table_expressions.iter())
-    //         {
-    //             max_degree = std::cmp::max(max_degree, poly.folding_degree() + 2);
-    //         }
-    //     }
-    //     max_degree
-    // }
+        // Get maximum of all lookup constraints.
+        // Add 1 to account for theta challenge
+        // Add 1 to account for h/g
+        for lookup in &self.cs.lookups {
+            for poly in lookup
+                .input_expressions
+                .iter()
+                .chain(lookup.table_expressions.iter())
+            {
+                max_degree = std::cmp::max(max_degree, poly.folding_degree() + 2);
+            }
+        }
+        // add 1 for beta
+        // add 1 for ys
+        max_degree + 2
+    }
 
     /// Total number of linearly-independent constraints, whose degrees are larger than 1
     pub fn num_folding_constraints(&self) -> usize {
@@ -182,6 +182,17 @@ impl<C: CurveAffine> ProvingKey<C> {
             .map(|gate| gate.polynomials().len())
             .sum::<usize>()
             + 2 * self.cs.lookups.len()
+    }
+
+    pub fn selector_ref(&self) -> Vec<&[C::Scalar]> {
+        self.selectors_polys
+            .iter()
+            .map(|poly| poly.as_ref())
+            .collect()
+    }
+
+    pub fn fixed_ref(&self) -> Vec<&[C::Scalar]> {
+        self.fixed_polys.iter().map(|poly| poly.as_ref()).collect()
     }
 }
 

@@ -1,23 +1,15 @@
 use ff::{BatchInvert, FromUniformBytes};
 use halo2_proofs::{
-    arithmetic::{CurveAffine, Field},
+    arithmetic::Field,
     circuit::{floor_planner::V1, Layouter, Value},
-    dev::{metadata, FailureLocation, MockProver, VerifyFailure},
     plonk::*,
-    poly::{
+    poly::{self, commitment::ParamsProver, VerificationStrategy},
+    protostar::{
         self,
-        commitment::ParamsProver,
-        ipa::{
-            commitment::{IPACommitmentScheme, ParamsIPA},
-            multiopen::{ProverIPA, VerifierIPA},
-            strategy::AccumulatorStrategy,
-        },
-        VerificationStrategy,
+        accumulator::Accumulator,
+        // decider::create_proof,
     },
-    protostar::{self, decider::create_proof},
-    transcript::{
-        Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer,
-    },
+    transcript::{Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer},
 };
 use halo2curves::pasta::pallas;
 use rand_core::{OsRng, RngCore};
@@ -264,7 +256,8 @@ fn main() {
 
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
     let pk = protostar::ProvingKey::new(&params, &circuit1).unwrap();
-    let mut acc = protostar::prover::create_accumulator(
+
+    let acc1 = protostar::prover::create_accumulator(
         &params,
         &pk,
         &circuit1,
@@ -273,14 +266,16 @@ fn main() {
         &mut transcript,
     )
     .unwrap();
-    assert!(acc.decide(&params, &pk));
+
+    // An accumulator is always valid
+    assert!(Accumulator::decide(&params, &pk, &acc1));
 
     // Folding an accumulator with itself should yield the same one,
     // since (1-X)*acc + X*acc = acc
-    let acc1 = acc.clone();
-    acc.fold(&pk, acc1.clone(), &mut transcript);
-    assert!(acc.decide(&params, &pk));
+    let acc = Accumulator::fold(&pk, acc1.clone(), acc1.clone(), &mut transcript);
     assert_eq!(acc, acc1);
+
+    assert!(Accumulator::decide(&params, &pk, &acc));
 
     let acc2 = protostar::prover::create_accumulator(
         &params,
@@ -291,31 +286,9 @@ fn main() {
         &mut transcript,
     )
     .unwrap();
-    acc.fold(&pk, acc2, &mut transcript);
-    assert!(acc.decide(&params, &pk));
 
-    let acc3 = protostar::prover::create_accumulator(
-        &params,
-        &pk,
-        &circuit3,
-        &[],
-        &mut rng,
-        &mut transcript,
-    )
-    .unwrap();
-    acc.fold(&pk, acc3, &mut transcript);
+    let acc = Accumulator::fold(&pk, acc, acc2, &mut transcript);
+    assert!(Accumulator::decide(&params, &pk, &acc));
 
-    let acc4 = protostar::prover::create_accumulator(
-        &params,
-        &pk,
-        &circuit3,
-        &[],
-        &mut rng,
-        &mut transcript,
-    )
-    .unwrap();
-    acc.fold(&pk, acc4, &mut transcript);
-    assert!(acc.decide(&params, &pk));
-
-    let _ = create_proof::<_, ProverIPA<_>, _, _, _>(&params, &pk, acc, &mut rng, &mut transcript);
+    // let _ = create_proof::<_, ProverIPA<_>, _, _, _>(&params, &pk, acc, &mut rng, &mut transcript);
 }

@@ -21,7 +21,7 @@ use group::Curve;
 use halo2curves::CurveAffine;
 use rand_core::RngCore;
 
-use super::{Accumulator, ProvingKey};
+use super::{accumulator::Accumulator, ProvingKey};
 
 pub fn create_proof<
     'params,
@@ -43,7 +43,7 @@ where
     let domain = &pk.domain;
     let cs = &pk.cs;
     let blinding_factors = cs.blinding_factors();
-    let challenges = acc.advice_challenges();
+    let challenges = acc.advice.challenges;
 
     let first_row = 0;
     let num_rows = params.n() as usize;
@@ -64,15 +64,29 @@ where
     // Sample gamma challenge for permutation
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
+    let advice: Vec<_> = acc
+        .advice
+        .committed
+        .iter()
+        .map(|c| c.values.clone())
+        .collect();
+
+    let instance: Vec<_> = acc
+        .instance
+        .committed
+        .iter()
+        .map(|c| c.values.clone())
+        .collect();
+
     // Commit to permutations.
     let permutations: permutation::prover::Committed<Scheme::Curve> = pk.cs.permutation.commit(
         params,
         domain,
         &pk.cs,
         &pk.permutation_pk,
-        acc.advice_polys(),
+        &advice,
         &pk.fixed_polys,
-        acc.instance_polys(),
+        &instance,
         beta,
         gamma,
         &mut rng,
@@ -90,10 +104,10 @@ where
                 blinding_factors,
                 theta,
                 gamma,
-                acc.advice_polys(),
+                &advice,
                 &pk.fixed_polys,
                 &pk.selectors_polys,
-                acc.instance_polys(),
+                &instance,
                 &challenges,
                 &mut rng,
                 transcript,
@@ -103,7 +117,7 @@ where
 
     // Commit to error vector
 
-    let folding_error = acc.error_vector(&pk);
+    let folding_error = Accumulator::error_vector(&pk, &acc);
     let folding_error_commtiment = params
         .commit_lagrange(&folding_error, Blind::default())
         .to_affine();
@@ -122,15 +136,15 @@ where
         parallelize(&mut sumcheck, |values, start| {
             for (i, value) in values.iter_mut().enumerate() {
                 let idx = i + start;
-                *value = acc.beta_poly()[idx] * folding_error[idx];
+                *value = acc.beta.beta.values[idx] * folding_error[idx];
             }
         });
 
         // Add contribution of lookup sumcheck constraints
-        for lookup_single in &acc.lookup_transcript.singles_transcript {
+        for lookup in &acc.lookups {
             parallelize(&mut sumcheck, |values, start| {
-                let g = &lookup_single.g_poly;
-                let h = &lookup_single.h_poly;
+                let g = &lookup.g.values;
+                let h = &lookup.h.values;
                 for (i, value) in values.iter_mut().enumerate() {
                     let idx = i + start;
 
@@ -190,8 +204,7 @@ where
         .map(|poly| domain.coeff_to_extended(poly.clone()))
         .collect();
 
-    let advice_polys: Vec<_> = acc
-        .advice_polys()
+    let advice_polys: Vec<_> = advice
         .iter()
         .map(|poly| domain.lagrange_to_coeff(poly.clone()))
         .collect();
@@ -201,8 +214,7 @@ where
         .map(|poly| domain.coeff_to_extended(poly.clone()))
         .collect();
 
-    let instance_polys: Vec<_> = acc
-        .instance_polys()
+    let instance_polys: Vec<_> = instance
         .iter()
         .map(|poly| domain.lagrange_to_coeff(poly.clone()))
         .collect();
@@ -213,10 +225,9 @@ where
         .collect();
 
     let lookup_m_poly: Vec<_> = acc
-        .lookup_transcript
-        .singles_transcript
+        .lookups
         .iter()
-        .map(|lookup| domain.lagrange_to_coeff(lookup.m_poly.clone()))
+        .map(|lookup| domain.lagrange_to_coeff(lookup.m.values.clone()))
         .collect();
     let lookup_m_cosets: Vec<_> = lookup_m_poly
         .iter()
@@ -224,10 +235,9 @@ where
         .collect();
 
     let lookup_g_poly: Vec<_> = acc
-        .lookup_transcript
-        .singles_transcript
+        .lookups
         .iter()
-        .map(|lookup| domain.lagrange_to_coeff(lookup.g_poly.clone()))
+        .map(|lookup| domain.lagrange_to_coeff(lookup.g.values.clone()))
         .collect();
     let lookup_g_cosets: Vec<_> = lookup_g_poly
         .iter()
@@ -235,10 +245,9 @@ where
         .collect();
 
     let lookup_h_poly: Vec<_> = acc
-        .lookup_transcript
-        .singles_transcript
+        .lookups
         .iter()
-        .map(|lookup| domain.lagrange_to_coeff(lookup.h_poly.clone()))
+        .map(|lookup| domain.lagrange_to_coeff(lookup.h.values.clone()))
         .collect();
     let lookup_h_cosets: Vec<_> = lookup_h_poly
         .iter()
@@ -251,7 +260,7 @@ where
     let sumcheck_poly = domain.lagrange_to_coeff(sumcheck);
     let sumcheck_coset = domain.coeff_to_extended(sumcheck_poly.clone());
 
-    let beta_poly = domain.lagrange_to_coeff(acc.beta_poly().clone());
+    let beta_poly = domain.lagrange_to_coeff(acc.beta.beta.values.clone());
     let beta_coset = domain.coeff_to_extended(beta_poly.clone());
 
     // Compute l_0(X)
@@ -297,6 +306,8 @@ where
     //  - permutations
     //  - shuffles
     //  - sumcheck [ si + bi*ei + ∑l^j (h^j_i - g^j_i) - si' ] + l^{j+L}[ ∑j G'(a)] + Z'∏(b+wi) - Z∏(b+wi)
+
+    let challenges = &acc.advice.challenges;
 
     let quotient_coset = evaluate_quotient(
         pk,
@@ -361,10 +372,7 @@ where
             .advice_queries
             .iter()
             .map(|&(column, at)| {
-                eval_polynomial(
-                    &acc.advice_polys()[column.index()],
-                    domain.rotate_omega(*x, at),
-                )
+                eval_polynomial(&advice_polys[column.index()], domain.rotate_omega(*x, at))
             })
             .collect();
 
@@ -410,8 +418,9 @@ where
     // Compute and hash lookup evals (shared across all circuit instances)
     {
         let lookup_evals: Vec<_> = acc
-            .lookup_transcript
-            .polynomials_iter()
+            .lookups
+            .iter()
+            .flat_map(|lookup| [&lookup.m.values, &lookup.g.values, &lookup.h.values].into_iter())
             .map(|poly| eval_polynomial(poly, domain.rotate_omega(*x, Rotation::cur())))
             .collect();
 
@@ -474,7 +483,7 @@ where
         .chain(cs.advice_queries.iter().map(|&(column, at)| ProverQuery {
             point: domain.rotate_omega(*x, at),
             poly: &advice_polys[column.index()],
-            blind: acc.advice_transcript.advice_blinds[column.index()],
+            blind: acc.advice.committed[column.index()].blind,
         }))
         .chain(permutations_evals.open(x, x_next, x_last))
         .chain(
@@ -508,32 +517,26 @@ where
             ]
             .into_iter(),
         )
-        .chain(
-            acc.lookup_transcript
-                .singles_transcript
-                .iter()
-                .enumerate()
-                .flat_map(|(i, transcript)| {
-                    [
-                        ProverQuery {
-                            point: domain.rotate_omega(*x, Rotation::cur()),
-                            poly: &lookup_m_poly[i],
-                            blind: transcript.m_blind,
-                        },
-                        ProverQuery {
-                            point: domain.rotate_omega(*x, Rotation::cur()),
-                            poly: &lookup_g_poly[i],
-                            blind: transcript.g_blind,
-                        },
-                        ProverQuery {
-                            point: domain.rotate_omega(*x, Rotation::cur()),
-                            poly: &lookup_h_poly[i],
-                            blind: transcript.h_blind,
-                        },
-                    ]
-                    .into_iter()
-                }),
-        )
+        .chain(acc.lookups.iter().enumerate().flat_map(|(i, lookup)| {
+            [
+                ProverQuery {
+                    point: domain.rotate_omega(*x, Rotation::cur()),
+                    poly: &lookup_m_poly[i],
+                    blind: lookup.m.blind,
+                },
+                ProverQuery {
+                    point: domain.rotate_omega(*x, Rotation::cur()),
+                    poly: &lookup_g_poly[i],
+                    blind: lookup.g.blind,
+                },
+                ProverQuery {
+                    point: domain.rotate_omega(*x, Rotation::cur()),
+                    poly: &lookup_h_poly[i],
+                    blind: lookup.h.blind,
+                },
+            ]
+            .into_iter()
+        }))
         .chain(cs.fixed_queries.iter().map(|&(column, at)| ProverQuery {
             point: domain.rotate_omega(*x, at),
             poly: &fixed_polys[column.index()],

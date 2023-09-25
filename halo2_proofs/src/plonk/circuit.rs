@@ -2234,7 +2234,6 @@ impl<F: Field> ConstraintSystem<F> {
 
     /// Compute the degree of the constraint system (the maximum degree of all
     /// constraints).
-    /// TODO(@adr1anh): Folding degree?
     pub fn degree(&self) -> usize {
         // The permutation argument will serve alongside the gates, so must be
         // accounted for.

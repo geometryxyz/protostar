@@ -1,12 +1,13 @@
 use std::iter::zip;
 
+use super::committed::{commit_transparent, Committed};
 use crate::{
     arithmetic::parallelize,
     poly::{
         commitment::{Blind, CommitmentScheme, Params},
         Polynomial,
     },
-    transcript::{EncodedChallenge, Transcript, TranscriptWrite},
+    transcript::{EncodedChallenge, TranscriptWrite},
 };
 use crate::{
     poly::{empty_lagrange, LagrangeCoeff},
@@ -16,96 +17,64 @@ use ff::Field;
 use group::Curve;
 use halo2curves::CurveAffine;
 
-/// Transcript for the "Compressed-Verifier" protocol
-/// allowing the constraints over all rows to be compressed to a single one.
-/// TODO(@adr1anh): Implement variant where we commit to two vector of size sqrt(n).
-/// It is currently unsupported since the commitment scheme
-/// only allows for commitments of vectors of size n.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompressedVerifierTranscript<C: CurveAffine> {
-    beta_poly: Polynomial<C::Scalar, LagrangeCoeff>,
-    beta_commitment: C,
-    beta_blind: Blind<C::Scalar>,
+#[derive(PartialEq, Debug, Clone)]
+pub struct Transcript<C: CurveAffine> {
+    pub beta: Committed<C>,
+    pub beta_shift: Committed<C>,
 }
 
-/// Runs the final IOP protocol to generate beta,
-/// and commit to the vector with the powers of beta.
-pub fn create_compressed_verifier_transcript<
-    'params,
-    C: CurveAffine,
-    P: Params<'params, C>,
-    E: EncodedChallenge<C>,
-    T: TranscriptWrite<C, E>,
->(
-    params: &P,
-    transcript: &mut T,
-) -> CompressedVerifierTranscript<C> {
-    let n = params.n();
+impl<C: CurveAffine> Transcript<C> {
+    /// Runs the final IOP protocol to generate beta,
+    /// and commit to the vector with the powers of beta.
+    pub fn new<'params, P: Params<'params, C>, E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+        params: &P,
+        transcript: &mut T,
+    ) -> Self {
+        let n = params.n();
 
-    let beta = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+        let beta = *transcript.squeeze_challenge_scalar::<C::Scalar>();
 
-    // Vector of powers of `beta`
-    let mut beta_poly = empty_lagrange(n as usize);
-    parallelize(&mut beta_poly, |o, start| {
-        let mut cur = beta.pow_vartime(&[start as u64]);
-        for v in o.iter_mut() {
-            *v = cur;
-            cur *= &beta;
+        // Vector of powers of `beta`
+        let mut beta_values = empty_lagrange(n as usize);
+        parallelize(&mut beta_values, |o, start| {
+            let mut cur = beta.pow_vartime(&[start as u64]);
+            for v in o.iter_mut() {
+                *v = cur;
+                cur *= &beta;
+            }
+        });
+
+        // No need to blind since the contents are known by the verifier
+        let committed = commit_transparent(params, beta_values, transcript);
+
+        // Prover and Verifier compute shifted beta column to linearize the constraint
+        //      beta[i+1] = beta[i] * beta
+        // We compute beta_shift s.t.
+        //      beta_shift[i] = beta[i] * beta = beta[i+1]
+        // and the constraints becomes
+        //      beta[0] = beta
+        //      beta_shift[i] = beta[i] * beta
+        let beta_shift_values = committed.values.clone() * beta;
+        let beta_shift_commitment = (committed.commitment * beta).to_affine();
+        let beta_shift_blind = committed.blind * beta;
+
+        let committed_shift = Committed {
+            values: beta_shift_values,
+            commitment: beta_shift_commitment,
+            blind: beta_shift_blind,
+        };
+
+        Self {
+            beta: committed,
+            beta_shift: committed_shift,
         }
-    });
-
-    let beta_blind = Blind::default();
-    let beta_commitment = params.commit_lagrange(&beta_poly, beta_blind).to_affine();
-
-    let _ = transcript.write_point(beta_commitment);
-    CompressedVerifierTranscript {
-        beta_poly,
-        beta_commitment,
-        beta_blind,
-    }
-}
-
-impl<C: CurveAffine> CompressedVerifierTranscript<C> {
-    pub fn beta(&self) -> C::Scalar {
-        self.beta_poly[0]
     }
 
-    pub fn beta_poly(&self) -> &Polynomial<C::Scalar, LagrangeCoeff> {
-        &self.beta_poly
-    }
+    pub(super) fn merge(alpha: C::Scalar, transcript0: Self, transcript1: Self) -> Self {
+        let beta = Committed::fold(alpha, transcript0.beta, transcript1.beta);
+        let beta_shift = Committed::fold(alpha, transcript0.beta_shift, transcript1.beta_shift);
 
-    pub fn challenges_iter(&self) -> impl Iterator<Item = &C::Scalar> {
-        std::iter::empty()
-    }
-
-    pub fn challenges_iter_mut(&mut self) -> impl Iterator<Item = &mut C::Scalar> {
-        std::iter::empty()
-    }
-
-    pub fn polynomials_iter(&self) -> impl Iterator<Item = &Polynomial<C::Scalar, LagrangeCoeff>> {
-        std::iter::once(&self.beta_poly)
-    }
-
-    pub fn polynomials_iter_mut(
-        &mut self,
-    ) -> impl Iterator<Item = &mut Polynomial<C::Scalar, LagrangeCoeff>> {
-        std::iter::once(&mut self.beta_poly)
-    }
-
-    pub fn commitments_iter(&self) -> impl Iterator<Item = &C> {
-        std::iter::once(&self.beta_commitment)
-    }
-
-    pub fn commitments_iter_mut(&mut self) -> impl Iterator<Item = &mut C> {
-        std::iter::once(&mut self.beta_commitment)
-    }
-
-    pub fn blinds_iter(&self) -> impl Iterator<Item = &Blind<C::Scalar>> {
-        std::iter::once(&self.beta_blind)
-    }
-
-    pub fn blinds_iter_mut(&mut self) -> impl Iterator<Item = &mut Blind<C::Scalar>> {
-        std::iter::once(&mut self.beta_blind)
+        Self { beta, beta_shift }
     }
 }
 
