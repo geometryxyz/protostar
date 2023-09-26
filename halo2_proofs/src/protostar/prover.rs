@@ -38,14 +38,12 @@ pub fn create_accumulator<
     // pk.vk.hash_into(transcript)?;
 
     // Add public inputs/outputs to the transcript, and convert them to `Polynomial`s
-    let instance = accumulator::instance::Transcript::new(params, &pk.cs, instances, transcript)?;
-
-    // Run multi-phase IOP section to generate all `Advice` columns
-    let advice =
-        accumulator::advice::Transcript::new(params, pk, circuit, &instance, &mut rng, transcript)?;
+    // and run multi-phase IOP section to generate all `Advice` columns
+    let gate =
+        accumulator::gate::Transcript::new(params, pk, circuit, instances, &mut rng, transcript)?;
 
     // Run the 2-round logUp IOP for all lookup arguments
-    let lookups = accumulator::lookup::new(params, pk, &instance, &advice, &mut rng, transcript);
+    let lookups = accumulator::lookup::new(params, pk, &gate, &mut rng, transcript);
 
     // Generate random column(s) to multiply each constraint
     // so that we can compress them to a single constraint
@@ -57,8 +55,7 @@ pub fn create_accumulator<
     let ys = powers(y).take(pk.num_folding_constraints()).collect();
 
     Ok(accumulator::Accumulator {
-        instance,
-        advice,
+        gate,
         lookups,
         beta,
         ys,

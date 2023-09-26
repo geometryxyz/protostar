@@ -18,22 +18,20 @@ use crate::{
 use self::committed::Committed;
 
 use super::{
-    constraints::{paired::Paired, polynomial::PolynomialRef, Data},
+    constraints::{paired::Paired, polynomial::CommittedRef, Data},
     ProvingKey,
 };
 
-pub(super) mod advice;
 pub(super) mod committed;
 pub(super) mod compressed_verifier;
-pub(super) mod instance;
+pub(super) mod gate;
 pub(super) mod lookup;
 
 /// An `Accumulator` contains the entirety of the IOP transcript,
 /// including commitments and verifier challenges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Accumulator<C: CurveAffine> {
-    pub instance: instance::Transcript<C>,
-    pub advice: advice::Transcript<C>,
+    pub gate: gate::Transcript<C>,
     pub lookups: Vec<lookup::Transcript<C>>,
     pub beta: compressed_verifier::Transcript<C>,
 
@@ -68,8 +66,7 @@ impl<C: CurveAffine> Accumulator<C> {
     }
 
     fn merge(acc0: Self, acc1: Self, error_poly: Vec<C::Scalar>, alpha: C::Scalar) -> Self {
-        let instance = instance::Transcript::merge(alpha, acc0.instance, acc1.instance);
-        let advice = advice::Transcript::merge(alpha, acc0.advice, acc1.advice);
+        let gate = gate::Transcript::merge(alpha, acc0.gate, acc1.gate);
         let lookups = zip(acc0.lookups.into_iter(), acc1.lookups.into_iter())
             .map(|(lookup0, lookup1)| lookup::Transcript::merge(alpha, lookup0, lookup1))
             .collect();
@@ -88,8 +85,7 @@ impl<C: CurveAffine> Accumulator<C> {
         assert_eq!(error1, acc1.error);
 
         Self {
-            instance,
-            advice,
+            gate,
             lookups,
             beta,
             ys,
@@ -102,53 +98,73 @@ impl<C: CurveAffine> Accumulator<C> {
         pk: &ProvingKey<C>,
         acc: &Self,
     ) -> bool {
-        let committed_iter: Vec<&Committed<C>> = acc
-            .instance
-            .committed
-            .iter()
-            .chain(&acc.advice.committed)
-            .chain([&acc.beta.beta, &acc.beta.beta_shift].into_iter())
-            .chain(
-                acc.lookups
-                    .iter()
-                    .flat_map(|lookup| [&lookup.m, &lookup.g, &lookup.h].into_iter()),
-            )
-            .collect();
+        // Check all Committed columns are correct (commit(values;bline) == commitment)
+        let committed_ok = {
+            let committed_iter: Vec<&Committed<C>> = acc
+                .gate
+                .instance
+                .iter()
+                .chain(&acc.gate.advice)
+                .chain([&acc.beta.beta, &acc.beta.error].into_iter())
+                .chain(
+                    acc.lookups
+                        .iter()
+                        .flat_map(|lookup| [&lookup.m, &lookup.g, &lookup.h].into_iter()),
+                )
+                .collect();
+            committed_iter.iter().all(|c| c.decide(params))
+        };
 
-        let committed_ok = committed_iter.iter().all(|c| c.decide(params));
+        // Check Error term  (error == ∑ᵢ βᵢ * Gᵢ)
+        let error_ok = { acc.error == Self::error(&pk, &acc) };
 
-        let error_vec = Self::error_vector(pk, acc);
+        // Check linear lookup constraint ∑ᵢ gᵢ == ∑ᵢ hᵢ
+        let lookups_ok = {
+            acc.lookups.iter().all(|lookup| {
+                let lhs: C::Scalar = lookup.g.values.iter().sum();
+                let rhs: C::Scalar = lookup.h.values.iter().sum();
+                lhs == rhs
+            })
+        };
 
-        let error = error_vec
-            .iter()
-            .zip(acc.beta.beta.values.iter())
-            .fold(C::Scalar::ZERO, |acc, (e, b)| acc + (*e * b));
+        // Check beta constraint eᵢ ≡ β ⋅ βᵢ − βᵢ₊₁, β₀ ≡ 1
+        let beta_ok = {
+            let beta_column = &acc.beta.beta.values;
+            let error_column = &acc.beta.error.values;
 
-        let error_ok = error == acc.error;
+            let beta = beta_column[1];
 
-        committed_ok && error_ok
+            let powers_ok = (1..pk.num_rows)
+                .into_iter()
+                .all(|i| error_column[i - 1] == beta_column[i - 1] * beta - beta_column[i]);
+
+            let init_ok = beta_column[0] == C::Scalar::ONE;
+            powers_ok && init_ok
+        };
+
+        committed_ok && error_ok && lookups_ok && beta_ok
     }
 
-    pub fn error_vector(pk: &ProvingKey<C>, acc: &Self) -> Polynomial<C::Scalar, LagrangeCoeff> {
-        let lagrange_data = Data::<PolynomialRef<'_, C::Scalar, LagrangeCoeff>>::new(&pk, &acc);
+    pub fn error(pk: &ProvingKey<C>, acc: &Self) -> C::Scalar {
+        let lagrange_data = Data::<CommittedRef<'_, C>>::new(&pk, &acc);
 
-        let full_constraint = lagrange_data.full_constraint_no_beta(pk.cs.gates(), pk.cs.lookups());
+        let full_constraint = lagrange_data.full_constraint(pk.cs.gates(), pk.cs.lookups());
 
         let mut error = pk.domain.empty_lagrange();
         parallelize(&mut error, |value, start| {
             for (i, v) in value.iter_mut().enumerate() {
                 let row_idx = i + start;
                 *v = full_constraint.evaluate(
-                    &|c| c,
-                    &|challenge| *challenge.value,
-                    &|fixed| fixed.column[fixed.row_idx(row_idx, pk.num_rows)],
-                    &|witness| witness.column[witness.row_idx(row_idx, pk.num_rows)],
-                    &|e| -e,
+                    &|&c| c,
+                    &|&challenge| *challenge.value,
+                    &|&fixed| fixed.column.values[fixed.row_idx(row_idx, pk.num_rows)],
+                    &|&witness| witness.column.values[witness.row_idx(row_idx, pk.num_rows)],
+                    &|&e| -e,
                     &|a, b| a + b,
                     &|a, b| a * b,
                 );
             }
         });
-        error
+        error.into_iter().sum()
     }
 }

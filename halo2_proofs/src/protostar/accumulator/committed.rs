@@ -1,3 +1,5 @@
+use std::ops::{Add, Mul};
+
 use ff::Field;
 use group::Curve;
 use halo2curves::CurveAffine;
@@ -12,6 +14,7 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
+/// Represents a committed column sent that the verifier can query.
 #[derive(PartialEq, Debug, Clone)]
 pub struct Committed<C: CurveAffine> {
     pub values: Polynomial<C::Scalar, LagrangeCoeff>,
@@ -19,24 +22,37 @@ pub struct Committed<C: CurveAffine> {
     pub blind: Blind<C::Scalar>,
 }
 
-impl<C: CurveAffine> Committed<C> {
-    pub(super) fn fold(alpha: C::Scalar, committed0: Self, committed1: Self) -> Self {
-        let values = {
-            let tmp = committed1.values - &committed0.values;
-            let tmp = tmp * alpha;
-            tmp + &committed0.values
-        };
-        let commitment = ((committed1.commitment - committed0.commitment) * alpha
-            + &committed0.commitment)
-            .to_affine();
-        let blind = (committed1.blind - committed0.blind) * alpha + committed0.blind;
+impl<C: CurveAffine> Add for Committed<C> {
+    type Output = Committed<C>;
+
+    fn add(self, rhs: Self) -> Self::Output {
         Self {
-            values,
-            commitment,
-            blind,
+            values: self.values + &rhs.values,
+            commitment: (self.commitment + rhs.commitment).to_affine(),
+            blind: self.blind + rhs.blind,
         }
     }
+}
 
+impl<C: CurveAffine> Mul<C::Scalar> for Committed<C> {
+    type Output = Committed<C>;
+
+    fn mul(self, rhs: C::Scalar) -> Self::Output {
+        Self {
+            values: self.values * rhs,
+            commitment: (self.commitment * rhs).to_affine(),
+            blind: self.blind * rhs,
+        }
+    }
+}
+
+impl<C: CurveAffine> Committed<C> {
+    /// Compute the linear combination (1−α)⋅ c₀ + α⋅c₁
+    pub(super) fn merge(alpha: C::Scalar, committed0: Self, committed1: Self) -> Self {
+        committed0 * (C::Scalar::ONE - alpha) + committed1 * alpha
+    }
+
+    /// Checks whether the commitment is valid with regards to the underlying column
     pub(super) fn decide<'params, P: Params<'params, C>>(&self, params: &P) -> bool {
         let commitment = params.commit_lagrange(&self.values, self.blind).to_affine();
         debug_assert_eq!(commitment, self.commitment);
@@ -44,6 +60,8 @@ impl<C: CurveAffine> Committed<C> {
     }
 }
 
+/// Given a set of columns to be sent to the verifier, compute their commitments and write them to transcript.
+/// Commitments are blinded.
 pub fn batch_commit<
     'params,
     C: CurveAffine,
@@ -88,6 +106,8 @@ pub fn batch_commit<
         .collect()
 }
 
+/// Given a set of columns to be sent to the verifier, compute their commitments and write them to transcript.
+/// Commitments are transparent using a default blinding value.
 pub fn batch_commit_transparent<
     'params,
     C: CurveAffine,
@@ -130,6 +150,7 @@ pub fn batch_commit_transparent<
         .collect()
 }
 
+/// Compute a single blinded commitment and write it to the transcript
 pub fn commit<
     'params,
     C: CurveAffine,
@@ -154,6 +175,7 @@ pub fn commit<
     }
 }
 
+/// Compute a single transparent commitment and write it to the transcript
 pub fn commit_transparent<
     'params,
     C: CurveAffine,

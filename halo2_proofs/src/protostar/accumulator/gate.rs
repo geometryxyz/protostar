@@ -1,37 +1,41 @@
-use super::{
-    committed::{batch_commit, Committed},
-    instance,
-};
-use crate::{
-    arithmetic::{eval_polynomial, powers, CurveAffine},
-    circuit::{layouter::SyncDeps, Value},
-    plonk::{
-        sealed::{self, Phase, SealedPhase},
-        Advice, Any, Assigned, Assignment, Challenge, Circuit, Column, ConstraintSystem, Error,
-        FirstPhase, Fixed, FloorPlanner, Instance, Selector, VerifyingKey,
-    },
-    poly::{
-        self,
-        commitment::{Blind, CommitmentScheme, Params, Prover},
-        empty_lagrange_assigned, Basis, Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial,
-        ProverQuery,
-    },
-    poly::{batch_invert_assigned, empty_lagrange},
-    protostar::keygen::ProvingKey,
-    transcript::{EncodedChallenge, TranscriptWrite},
-};
-use ff::{Field, FromUniformBytes, PrimeField, WithSmallOrderMulGroup};
-use group::{prime::PrimeCurveAffine, Curve};
-use rand_core::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     iter::zip,
     ops::RangeTo,
 };
 
+use ff::Field;
+use halo2curves::CurveAffine;
+use rand_core::RngCore;
+
+use crate::{
+    circuit::{layouter::SyncDeps, Value},
+    plonk::{
+        circuit::FloorPlanner,
+        sealed::{self, SealedPhase},
+        Advice, Any, Assigned, Assignment, Challenge, Circuit, Column, ConstraintSystem, Error,
+        FirstPhase, Fixed, Instance, Selector,
+    },
+    poly::{
+        batch_invert_assigned,
+        commitment::{Blind, Params},
+        empty_lagrange, empty_lagrange_assigned, LagrangeCoeff, Polynomial,
+    },
+    protostar::{accumulator::committed::batch_commit, ProvingKey},
+    transcript::{EncodedChallenge, TranscriptWrite},
+};
+
+use super::committed::Committed;
+
+/// A gate transcript is the result of running the IOP for several rounds,
+/// where in each round, the prover sends commitments to one or more advice columns
+/// and the verifier responds with one or more challenges.
+/// The order in which these are sent are defined by the ConstraintSystem.
+/// Both parties agree on the instance, and then the prover sends the corresponding advice columns.
 #[derive(PartialEq, Debug, Clone)]
 pub struct Transcript<C: CurveAffine> {
-    pub committed: Vec<Committed<C>>,
+    pub instance: Vec<Committed<C>>,
+    pub advice: Vec<Committed<C>>,
     pub challenges: Vec<C::Scalar>,
 }
 
@@ -47,7 +51,7 @@ impl<C: CurveAffine> Transcript<C> {
         params: &P,
         pk: &ProvingKey<C>,
         circuit: &ConcreteCircuit,
-        instance: &instance::Transcript<C>,
+        instances: &[&[C::Scalar]],
         mut rng: R,
         transcript: &mut T,
     ) -> Result<Self, Error> {
@@ -67,9 +71,53 @@ impl<C: CurveAffine> Transcript<C> {
 
         let meta = &pk.cs;
 
-        // Synthesize the circuit over multiple iterations
+        let instance: Vec<_> = {
+            if instances.len() != meta.num_instance_columns {
+                return Err(Error::InvalidInstances);
+            }
 
-        // TODO(@adr1anh): Use `circuit_data.num_advice_rows` to only allocate required number of rows
+            let instance_columns = instances
+                .iter()
+                .map(|values| {
+                    // TODO(@adr1anh): Allocate only the required size for each column
+                    let mut column = empty_lagrange(n);
+
+                    if values.len() > (column.len() - (meta.blinding_factors() + 1)) {
+                        return Err(Error::InstanceTooLarge);
+                    }
+                    for (v, value) in zip(column.iter_mut(), values.iter()) {
+                        *v = *value;
+                    }
+                    Ok(column)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // TODO(@adr1anh): Add support for query instance
+            // if !P::QUERY_INSTANCE
+            {
+                // The instance is part of the transcript
+                for &instance in instances {
+                    for value in instance {
+                        transcript.common_scalar(*value)?;
+                    }
+                }
+
+                instance_columns
+                    .into_iter()
+                    .map(|column| Committed {
+                        values: column,
+                        commitment: C::identity(),
+                        blind: Blind(C::Scalar::default()),
+                    })
+                    .collect()
+            }
+            // else {
+            // // For large instances, we send a commitment to it and open it with PCS
+            // batch_commit_transparent(params, instance_columns.into_iter(), transcript);
+            // }
+        };
+
+        // Synthesize the circuit over multiple iterations
         let mut advice_assigned = vec![empty_lagrange_assigned(n); meta.num_advice_columns];
         let mut advice_committed = BTreeMap::<usize, Committed<C>>::new();
         let mut challenges = HashMap::<usize, C::Scalar>::with_capacity(meta.num_challenges);
@@ -77,7 +125,6 @@ impl<C: CurveAffine> Transcript<C> {
         let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
 
         let instances = instance
-            .committed
             .iter()
             .map(|committed| &committed.values)
             .collect::<Vec<_>>();
@@ -165,17 +212,25 @@ impl<C: CurveAffine> Transcript<C> {
             .collect::<Vec<_>>();
 
         Ok(Transcript {
-            committed: advice_committed.into_values().collect(),
+            instance,
+            advice: advice_committed.into_values().collect(),
             challenges,
         })
     }
 
+    /// Computes the linear combination (1−α)⋅tx₀ + α⋅tx₁
     pub(super) fn merge(alpha: C::Scalar, transcript0: Self, transcript1: Self) -> Self {
-        let committed = zip(
-            transcript0.committed.into_iter(),
-            transcript1.committed.into_iter(),
+        let advice = zip(
+            transcript0.advice.into_iter(),
+            transcript1.advice.into_iter(),
         )
-        .map(|(committed0, committed1)| Committed::fold(alpha, committed0, committed1))
+        .map(|(committed0, committed1)| Committed::merge(alpha, committed0, committed1))
+        .collect();
+        let instance = zip(
+            transcript0.instance.into_iter(),
+            transcript1.instance.into_iter(),
+        )
+        .map(|(committed0, committed1)| Committed::merge(alpha, committed0, committed1))
         .collect();
 
         let challenges = zip(
@@ -185,17 +240,10 @@ impl<C: CurveAffine> Transcript<C> {
         .map(|(challenge0, challenge1)| challenge0 + (challenge1 - challenge0) * &alpha)
         .collect();
         Self {
-            committed,
+            instance,
+            advice,
             challenges,
         }
-    }
-
-    pub fn columns_ref(&self) -> Vec<&[C::Scalar]> {
-        self.committed.iter().map(|c| c.values.as_ref()).collect()
-    }
-
-    pub fn challenges_ref(&self) -> &[C::Scalar] {
-        &self.challenges
     }
 }
 
@@ -342,48 +390,3 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
         // Do nothing; we don't care about namespaces in this context.
     }
 }
-
-// #[cfg(test)]
-
-// mod tests {
-//     use crate::{
-//         plonk::keygen_vk,
-//         poly::{
-//             commitment::ParamsProver,
-//             ipa::{commitment::IPACommitmentScheme, multiopen::ProverIPA},
-//         },
-//         protostar::shuffle::MyCircuit,
-//         transcript::{Blake2bWrite, Challenge255, TranscriptWriterBuffer},
-//     };
-//     use core::num;
-
-//     use crate::plonk::{sealed::Phase, ConstraintSystem, FirstPhase};
-//     use crate::{halo2curves::pasta::pallas, plonk::sealed::SealedPhase};
-
-//     use super::*;
-//     use crate::plonk::sealed;
-//     use crate::plonk::Expression;
-//     use rand_core::{OsRng, RngCore};
-
-//     #[test]
-//     fn test_expression_conversion() {
-//         let mut rng = OsRng;
-//         const W: usize = 4;
-//         const H: usize = 32;
-//         const K: u32 = 8;
-//         let circuit = MyCircuit::<_, W, H>::rand(&mut rng);
-
-//         let params = poly::ipa::commitment::ParamsIPA::<pallas::Affine>::new(K);
-//         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
-//         let pk = ProvingKey::new(&params, &circuit).unwrap();
-//         let data = create_advice_transcript(
-//             &params,
-//             &pk,
-//             &circuit,
-//             &Vec::new(),
-//             &mut rng,
-//             &mut transcript,
-//         );
-//         assert!(data.is_ok());
-//     }
-// }

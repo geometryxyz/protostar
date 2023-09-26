@@ -2,6 +2,8 @@ use std::ops::{Add, Mul, Neg, Sub};
 
 use ff::Field;
 
+use crate::poly::Rotation;
+
 /// Mirror of a `plonk::Expression` where nodes have been moved to a `Queries` structure, and replaced with their indices therein.
 #[derive(Clone)]
 pub enum Expression<F, CV, FV, WV> {
@@ -53,28 +55,22 @@ impl<F, CV, FV, WV> Expression<F, CV, FV, WV> {
     /// Evaluate the polynomial using the provided closures to perform the operations.
     pub fn evaluate<T>(
         &self,
-        constant: &impl Fn(F) -> T,
-        challenge: &impl Fn(CV) -> T,
-        fixed: &impl Fn(FV) -> T,
-        witness: &impl Fn(WV) -> T,
-        negated: &impl Fn(T) -> T,
+        constant: &impl Fn(&F) -> T,
+        challenge: &impl Fn(&CV) -> T,
+        fixed: &impl Fn(&FV) -> T,
+        witness: &impl Fn(&WV) -> T,
+        negated: &impl Fn(&T) -> T,
         sum: &impl Fn(T, T) -> T,
         product: &impl Fn(T, T) -> T,
-    ) -> T
-    where
-        F: Copy,
-        CV: Copy,
-        FV: Copy,
-        WV: Copy,
-    {
+    ) -> T {
         match self {
-            Self::Constant(v) => constant(*v),
-            Self::Challenge(v) => challenge(*v),
-            Self::Fixed(v) => fixed(*v),
-            Self::Witness(v) => witness(*v),
+            Self::Constant(v) => constant(v),
+            Self::Challenge(v) => challenge(v),
+            Self::Fixed(v) => fixed(v),
+            Self::Witness(v) => witness(v),
             Self::Negated(a) => {
                 let a = a.evaluate(constant, challenge, fixed, witness, negated, sum, product);
-                negated(a)
+                negated(&a)
             }
             Self::Sum(a, b) => {
                 let a = a.evaluate(constant, challenge, fixed, witness, negated, sum, product);
@@ -92,25 +88,19 @@ impl<F, CV, FV, WV> Expression<F, CV, FV, WV> {
     /// Evaluate the polynomial using the provided mutable closures to perform the operations.
     pub fn evaluate_mut<T>(
         &self,
-        constant: &mut impl FnMut(F) -> T,
-        challenge: &mut impl FnMut(CV) -> T,
-        fixed: &mut impl FnMut(FV) -> T,
-        witness: &mut impl FnMut(WV) -> T,
+        constant: &mut impl FnMut(&F) -> T,
+        challenge: &mut impl FnMut(&CV) -> T,
+        fixed: &mut impl FnMut(&FV) -> T,
+        witness: &mut impl FnMut(&WV) -> T,
         negated: &mut impl FnMut(T) -> T,
         sum: &mut impl FnMut(T, T) -> T,
         product: &mut impl FnMut(T, T) -> T,
-    ) -> T
-    where
-        F: Copy,
-        CV: Copy,
-        FV: Copy,
-        WV: Copy,
-    {
+    ) -> T {
         match self {
-            Self::Constant(v) => constant(*v),
-            Self::Challenge(v) => challenge(*v),
-            Self::Fixed(v) => fixed(*v),
-            Self::Witness(v) => witness(*v),
+            Self::Constant(v) => constant(v),
+            Self::Challenge(v) => challenge(v),
+            Self::Fixed(v) => fixed(v),
+            Self::Witness(v) => witness(v),
             Self::Negated(a) => {
                 let a = a.evaluate_mut(constant, challenge, fixed, witness, negated, sum, product);
                 negated(a)
@@ -256,9 +246,14 @@ pub trait QueryType {
 
     /// Create a Witness QueriedExpression with 0 rotation
     fn new_witness(value: Self::Witness) -> QueriedExpression<Self> {
+        Self::new_witness_with_rotations(value, Rotation::cur())
+    }
+
+    /// Create a Witness QueriedExpression
+    fn new_witness_with_rotations(value: Self::Witness, rot: Rotation) -> QueriedExpression<Self> {
         QueriedExpression::<Self>::Witness(ColumnQuery {
             column: value,
-            rotation: 0,
+            rotation: rot.0,
         })
     }
 
@@ -322,10 +317,10 @@ impl<T: QueryType> IndexedExpression<T> {
 
         // Create an expression where the leaves are indices into `queried_*`
         let expr = expr.evaluate_mut(
-            &mut |constant| Expression::Constant(constant),
-            &mut |c| Expression::Challenge(find_or_insert(&mut challenges, &c)),
-            &mut |f| Expression::Fixed(find_or_insert(&mut fixed, &f)),
-            &mut |w| Expression::Witness(find_or_insert(&mut witness, &w)),
+            &mut |constant| Expression::Constant(*constant),
+            &mut |c| Expression::Challenge(find_or_insert(&mut challenges, c)),
+            &mut |f| Expression::Fixed(find_or_insert(&mut fixed, f)),
+            &mut |w| Expression::Witness(find_or_insert(&mut witness, w)),
             &mut |e| Expression::Negated(e.into()),
             &mut |e1, e2| Expression::Sum(e1.into(), e2.into()),
             &mut |e1, e2| Expression::Product(e1.into(), e2.into()),

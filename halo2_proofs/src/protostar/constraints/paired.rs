@@ -38,18 +38,18 @@ impl<'a, F: Field> Paired<'a, F> {
     where
         C: CurveAffine<ScalarExt = F>,
     {
-        let selectors: Vec<_> = pk.selectors_polys.iter().collect();
-        let fixed: Vec<_> = pk.fixed_polys.iter().collect();
+        let selectors: Vec<_> = pk.selectors.iter().map(|c| &c.values).collect();
+        let fixed: Vec<_> = pk.fixed.iter().map(|c| &c.values).collect();
 
-        let instance: Vec<_> = zip(&acc0.instance.committed, &acc1.instance.committed)
+        let instance: Vec<_> = zip(&acc0.gate.instance, &acc1.gate.instance)
             .map(|(i0, i1)| [&i0.values, &i1.values])
             .collect();
 
-        let advice: Vec<_> = zip(&acc0.advice.committed, &acc1.advice.committed)
+        let advice: Vec<_> = zip(&acc0.gate.advice, &acc1.gate.advice)
             .map(|(a0, a1)| [&a0.values, &a1.values])
             .collect();
 
-        let challenges: Vec<_> = zip(&acc0.advice.challenges, &acc1.advice.challenges)
+        let challenges: Vec<_> = zip(&acc0.gate.challenges, &acc1.gate.challenges)
             .map(|(c0, c1)| [c0, c1])
             .collect();
 
@@ -128,11 +128,11 @@ impl<'a, F: Field> Paired<'a, F> {
             // Evaluate the expression in the current row and
             for (eval_idx, eval) in sum.evals.iter_mut().enumerate() {
                 *eval += indexed.expr.evaluate(
-                    &|constant| constant,
-                    &|challenge_idx| challenges[challenge_idx].evals[eval_idx],
-                    &|fixed_idx| fixed[fixed_idx],
-                    &|witness_idx| witness[witness_idx].evals[eval_idx],
-                    &|negated| -negated,
+                    &|&constant| constant,
+                    &|&challenge_idx| challenges[challenge_idx].evals[eval_idx],
+                    &|&fixed_idx| fixed[fixed_idx],
+                    &|&witness_idx| witness[witness_idx].evals[eval_idx],
+                    &|&negated| -negated,
                     &|a, b| a + b,
                     &|a, b| a * b,
                 );

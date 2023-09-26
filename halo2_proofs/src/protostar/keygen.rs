@@ -20,6 +20,8 @@ use crate::{
     },
 };
 
+use super::accumulator::committed::{batch_commit_transparent, Committed};
+
 /// Contains all fixed data for a circuit that is required to create a Protostar `Accumulator`
 #[derive(Debug)]
 pub struct ProvingKey<C: CurveAffine> {
@@ -33,16 +35,8 @@ pub struct ProvingKey<C: CurveAffine> {
     pub cs: ConstraintSystem<C::Scalar>,
 
     // Fixed columns
-    // fixed[col][row]
-    pub fixed_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    pub fixed_commitments: Vec<C>,
-    // Selector columns as `bool`s
-    // selectors[col][row]
-    // TODO(@adr1anh): Replace with a `BTreeMap` to save memory
-    pub selectors: Vec<BTreeSet<usize>>,
-    pub selectors_polys: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    pub selectors_commitments: Vec<C>,
-
+    pub fixed: Vec<Committed<C>>,
+    pub selectors: Vec<Committed<C>>,
     pub(crate) permutation_pk: permutation::ProvingKey<C>,
 }
 
@@ -83,7 +77,7 @@ impl<C: CurveAffine> ProvingKey<C> {
 
             fixed: vec![empty_lagrange_assigned(num_rows); cs.num_fixed_columns],
             permutation: permutation::keygen::Assembly::new(num_rows, &cs.permutation),
-            selectors: vec![BTreeSet::new(); cs.num_selectors],
+            selectors: vec![domain.empty_lagrange(); cs.num_selectors],
 
             _marker: std::marker::PhantomData,
         };
@@ -96,11 +90,33 @@ impl<C: CurveAffine> ProvingKey<C> {
             cs.constants.clone(),
         )?;
 
-        let fixed_polys = batch_invert_assigned(assembly.fixed);
+        let fixed = batch_invert_assigned(assembly.fixed);
 
-        let fixed_commitments: Vec<_> = fixed_polys
-            .iter()
-            .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
+        let fixed: Vec<_> = fixed
+            .into_iter()
+            .map(|values| {
+                let blind = Blind::default();
+                let commitment = params.commit_lagrange(&values, blind).to_affine();
+                Committed {
+                    values,
+                    commitment,
+                    blind,
+                }
+            })
+            .collect();
+
+        let selectors = assembly
+            .selectors
+            .into_iter()
+            .map(|values| {
+                let blind = Blind::default();
+                let commitment = params.commit_lagrange(&values, blind).to_affine();
+                Committed {
+                    values,
+                    commitment,
+                    blind,
+                }
+            })
             .collect();
 
         // We don't want to compress selectors for our usecase,
@@ -111,23 +127,6 @@ impl<C: CurveAffine> ProvingKey<C> {
         //         .map(|poly| domain.lagrange_from_vec(poly)),
         // );
 
-        let selectors_polys: Vec<_> = assembly
-            .selectors
-            .iter()
-            .map(|selector| {
-                let mut poly = empty_lagrange(num_rows);
-                for &i in selector {
-                    poly[i] = C::Scalar::ONE;
-                }
-                poly
-            })
-            .collect();
-
-        let selectors_commitments: Vec<_> = selectors_polys
-            .iter()
-            .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
-            .collect();
-
         let permutation_pk = assembly
             .permutation
             .build_pk(params, &domain, cs.permutation());
@@ -137,11 +136,8 @@ impl<C: CurveAffine> ProvingKey<C> {
             num_rows,
             usable_rows: assembly.usable_rows,
             cs,
-            fixed_polys,
-            fixed_commitments,
-            selectors: assembly.selectors,
-            selectors_polys,
-            selectors_commitments,
+            fixed,
+            selectors,
             permutation_pk,
         })
     }
@@ -185,46 +181,23 @@ impl<C: CurveAffine> ProvingKey<C> {
     }
 
     pub fn selector_ref(&self) -> Vec<&[C::Scalar]> {
-        self.selectors_polys
-            .iter()
-            .map(|poly| poly.as_ref())
-            .collect()
+        self.selectors.iter().map(|c| c.values.as_ref()).collect()
     }
 
     pub fn fixed_ref(&self) -> Vec<&[C::Scalar]> {
-        self.fixed_polys.iter().map(|poly| poly.as_ref()).collect()
+        self.fixed.iter().map(|c| c.values.as_ref()).collect()
     }
 }
-
-// TODO(@adr1anh): Derive from ProvingKey
-// /// This is a verifying key which allows for the verification of proofs for a
-// /// particular circuit.
-// #[derive(Clone, Debug)]
-// pub struct VerifyingKey<C: CurveAffine> {
-//     domain: EvaluationDomain<C::Scalar>,
-//     fixed_commitments: Vec<C>,
-//     permutation: permutation::VerifyingKey<C>,
-//     cs: ConstraintSystem<C::Scalar>,
-//     /// Cached maximum degree of `cs` (which doesn't change after construction).
-//     cs_degree: usize,
-//     /// The representative of this `VerifyingKey` in transcripts.
-//     transcript_repr: C::Scalar,
-//     selectors: Vec<Vec<bool>>,
-// }
-
-// TODO: generate VerifyingKey after ProvingKey is generated
 
 /// Assembly to be used in circuit synthesis.
 #[derive(Debug)]
 struct Assembly<F: Field> {
     usable_rows: Range<usize>,
-    // TODO(@adr1anh): Only needed for the Error, remove later
     k: u32,
 
     fixed: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
     permutation: permutation::keygen::Assembly,
-    // TODO(@adr1anh): Replace with Vec<BTreeSet<bool>>
-    selectors: Vec<BTreeSet<usize>>,
+    selectors: Vec<Polynomial<F, LagrangeCoeff>>,
 
     _marker: std::marker::PhantomData<F>,
 }
@@ -253,7 +226,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        self.selectors[selector.0].insert(row);
+        self.selectors[selector.0][row] = F::ONE;
 
         Ok(())
     }
@@ -370,73 +343,5 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 
     fn pop_namespace(&mut self, _: Option<String>) {
         // Do nothing; we don't care about namespaces in this context.
-    }
-}
-
-// struct VerifyingKey<C: CurveAffine> {
-//     _phantom: PhantomData<C>,
-// }
-
-// /// A Protostar proving key that augments `CircuitData`
-// pub struct ProvingKey<'cd, F: Field> {
-//     circuit_data: &'cd CircuitData<F>,
-//     pub gates: Vec<Gate<F>>,
-//     pub max_challenge_power: Vec<usize>,
-//     // vk: VerifyingKey<C>,
-//     // ev etc?
-// }
-
-// impl<'cd, F: Field> ProvingKey<'cd, F> {
-//     pub fn new(circuit_data: &'cd CircuitData<F>) -> Result<ProvingKey<'cd, F>, Error> {
-//         // let vk = VerifyingKey {
-//         //     _phantom: Default::default(),
-//         // };
-//         Ok(ProvingKey {
-//             circuit_data,
-//             gates,
-//             max_challenge_power,
-//         })
-//     }
-// }
-
-/// Undo `Constraints::with_selector` and return the common top-level `Selector` along with the `Expression` it selects.
-/// If no simple `Selector` is found, returns the original list of polynomials.
-pub fn extract_common_simple_selector<F: Field>(
-    polys: &[Expression<F>],
-) -> (Vec<Expression<F>>, Option<Selector>) {
-    let (extracted_polys, simple_selectors): (Vec<_>, Vec<_>) = polys
-        .iter()
-        .map(|poly| {
-            // Check whether the top node is a multiplication by a selector
-            let (simple_selector, poly) = match poly {
-                // If the whole polynomial is multiplied by a simple selector,
-                // return it along with the expression it selects
-                Expression::Product(e1, e2) => match (&**e1, &**e2) {
-                    (Expression::Selector(s), e) | (e, Expression::Selector(s)) => (Some(*s), e),
-                    _ => (None, poly),
-                },
-                _ => (None, poly),
-            };
-            (poly.clone(), simple_selector)
-        })
-        .unzip();
-
-    // Check if all simple selectors are the same and if so select it
-    let potential_selector = match simple_selectors.as_slice() {
-        [head, tail @ ..] => {
-            if let Some(s) = *head {
-                tail.iter().all(|x| x.is_some_and(|x| s == x)).then(|| s)
-            } else {
-                None
-            }
-        }
-        [] => None,
-    };
-
-    // if we haven't found a common simple selector, then we just use the previous polys
-    if potential_selector.is_none() {
-        (polys.to_vec(), None)
-    } else {
-        (extracted_polys, potential_selector)
     }
 }

@@ -132,14 +132,6 @@ impl<T: QueryType> Data<T> {
     ) -> QueriedExpression<T> {
         let beta = T::new_witness(self.beta);
 
-        beta * self.full_constraint_no_beta(gates, lookups)
-    }
-
-    pub fn full_constraint_no_beta(
-        &self,
-        gates: &[plonk::circuit::Gate<T::F>],
-        lookups: &[plonk::lookup::Argument<T::F>],
-    ) -> QueriedExpression<T> {
         let constraints = self.all_constraints(gates, lookups);
 
         let ys = self
@@ -147,6 +139,6 @@ impl<T: QueryType> Data<T> {
             .iter()
             .map(|y| T::new_challenge(*y))
             .collect::<Vec<_>>();
-        T::linear_combination(&constraints, &ys)
+        beta * T::linear_combination(&constraints, &ys)
     }
 }

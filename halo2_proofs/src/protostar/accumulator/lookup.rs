@@ -26,9 +26,9 @@ pub struct Transcript<C: CurveAffine> {
 
 impl<C: CurveAffine> Transcript<C> {
     pub(super) fn merge(alpha: C::Scalar, transcript0: Self, transcript1: Self) -> Self {
-        let m = Committed::fold(alpha, transcript0.m, transcript1.m);
-        let g = Committed::fold(alpha, transcript0.g, transcript1.g);
-        let h = Committed::fold(alpha, transcript0.h, transcript1.h);
+        let m = Committed::merge(alpha, transcript0.m, transcript1.m);
+        let g = Committed::merge(alpha, transcript0.g, transcript1.g);
+        let h = Committed::merge(alpha, transcript0.h, transcript1.h);
 
         let r = (transcript1.r - transcript0.r) * alpha + transcript0.r;
         let thetas = zip(
@@ -51,16 +51,31 @@ pub fn new<
 >(
     params: &P,
     pk: &ProvingKey<C>,
-    instance: &super::instance::Transcript<C>,
-    advice: &super::advice::Transcript<C>,
+    gate_tx: &super::gate::Transcript<C>,
     mut rng: R,
     transcript: &mut T,
 ) -> Vec<Transcript<C>> {
-    let selectors = pk.selector_ref();
-    let fixed = pk.fixed_ref();
-    let instance = instance.columns_ref();
-    let challenges = advice.challenges_ref();
-    let advice = advice.columns_ref();
+    let selectors = pk
+        .selectors
+        .iter()
+        .map(|c| c.values.as_ref())
+        .collect::<Vec<_>>();
+    let fixed = pk
+        .fixed
+        .iter()
+        .map(|c| c.values.as_ref())
+        .collect::<Vec<_>>();
+    let instance = gate_tx
+        .instance
+        .iter()
+        .map(|c| c.values.as_ref())
+        .collect::<Vec<_>>();
+    let challenges = &gate_tx.challenges;
+    let advice = gate_tx
+        .advice
+        .iter()
+        .map(|c| c.values.as_ref())
+        .collect::<Vec<_>>();
 
     let m_columns = pk
         .cs

@@ -3,46 +3,46 @@ use halo2curves::CurveAffine;
 
 use crate::{
     poly::{Basis, LagrangeCoeff, Polynomial},
-    protostar::{accumulator::Accumulator, ProvingKey},
+    protostar::{
+        accumulator::{committed::Committed, Accumulator},
+        ProvingKey,
+    },
 };
 
 use super::{expression::QueryType, Data, LookupData};
 
 /// Defines a QueriedExpression where leaves are references values from two accumulators.
-pub struct PolynomialRef<'a, F, B> {
-    _marker: std::marker::PhantomData<&'a (F, B)>,
+pub struct CommittedRef<'a, C> {
+    _marker: std::marker::PhantomData<&'a C>,
 }
 
-impl<'a, F: Field, B: Basis> QueryType for PolynomialRef<'a, F, B> {
-    type F = F;
-    type Challenge = &'a F;
-    type Fixed = &'a Polynomial<F, B>;
-    type Witness = &'a Polynomial<F, B>;
+impl<'a, C: CurveAffine> QueryType for CommittedRef<'a, C> {
+    type F = C::Scalar;
+    type Challenge = &'a C::Scalar;
+    type Fixed = &'a Committed<C>;
+    type Witness = &'a Committed<C>;
 }
 
-impl<'a, F: Field> Data<PolynomialRef<'a, F, LagrangeCoeff>> {
-    pub fn new<C>(pk: &'a ProvingKey<C>, acc: &'a Accumulator<C>) -> Self
-    where
-        C: CurveAffine<ScalarExt = F>,
-    {
-        let selectors: Vec<_> = pk.selectors_polys.iter().collect();
-        let fixed: Vec<_> = pk.fixed_polys.iter().collect();
+impl<'a, C: CurveAffine> Data<CommittedRef<'a, C>> {
+    pub fn new(pk: &'a ProvingKey<C>, acc: &'a Accumulator<C>) -> Self {
+        let selectors: Vec<_> = pk.selectors.iter().collect();
+        let fixed: Vec<_> = pk.fixed.iter().collect();
 
-        let instance: Vec<_> = acc.instance.committed.iter().map(|i| &i.values).collect();
+        let instance: Vec<_> = acc.gate.instance.iter().collect();
 
-        let advice: Vec<_> = acc.advice.committed.iter().map(|a| &a.values).collect();
+        let advice: Vec<_> = acc.gate.advice.iter().collect();
 
-        let challenges: Vec<_> = acc.advice.challenges.iter().collect();
+        let challenges: Vec<_> = acc.gate.challenges.iter().collect();
 
-        let beta = &acc.beta.beta.values;
+        let beta = &acc.beta.beta;
 
         let lookups: Vec<_> = acc
             .lookups
             .iter()
             .map(|lookup| {
-                let m = &lookup.m.values;
-                let g = &lookup.g.values;
-                let h = &lookup.h.values;
+                let m = &lookup.m;
+                let g = &lookup.g;
+                let h = &lookup.h;
                 let thetas: Vec<_> = lookup.thetas.iter().collect();
                 let r = &lookup.r;
                 LookupData { m, g, h, thetas, r }
@@ -64,5 +64,3 @@ impl<'a, F: Field> Data<PolynomialRef<'a, F, LagrangeCoeff>> {
         }
     }
 }
-
-
