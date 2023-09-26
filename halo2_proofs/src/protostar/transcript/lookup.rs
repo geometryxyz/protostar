@@ -71,7 +71,9 @@ pub(crate) fn create_lookup_transcript<
             singles_transcript: vec![],
         };
     }
+    println!("DEBUG :: num_lookups: {:?}", num_lookups);
     let num_rows = params.n() as usize - pk.cs().blinding_factors() - 1 as usize;
+    println!("DEBUG :: num_rows: {:?}", num_rows);
 
     let table_values_map: Vec<_> = lookups
         .iter()
@@ -87,6 +89,9 @@ pub(crate) fn create_lookup_transcript<
             )
         })
         .collect();
+
+    println!("DEBUG :: table_values_map.len: {:?}", table_values_map.len());
+    println!("DEBUG :: table_values_map[0].len: {:?}", table_values_map[0].len());
 
     let m_polys: Vec<_> = lookups
         .iter()
@@ -105,6 +110,8 @@ pub(crate) fn create_lookup_transcript<
             .unwrap()
         })
         .collect();
+    println!("DEBUG :: m_polys.len: {:?}", m_polys.len());
+    println!("DEBUG :: m_polys[0].len: {:?}", m_polys[0].len());
 
     let (m_commitments_projective, m_blinds): (Vec<_>, Vec<_>) = m_polys
         .iter()
