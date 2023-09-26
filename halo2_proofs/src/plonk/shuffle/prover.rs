@@ -33,12 +33,12 @@ struct Compressed<C: CurveAffine> {
 }
 
 #[derive(Debug)]
-pub(in crate::plonk) struct Committed<C: CurveAffine> {
-    pub(in crate::plonk) product_poly: Polynomial<C::Scalar, Coeff>,
+pub(crate) struct Committed<C: CurveAffine> {
+    pub(crate) product_poly: Polynomial<C::Scalar, Coeff>,
     product_blind: Blind<C::Scalar>,
 }
 
-pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
+pub(crate) struct Evaluated<C: CurveAffine> {
     constructed: Committed<C>,
 }
 
@@ -49,11 +49,11 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
     ///   and S_compressed = \theta^{m-1} S_0 + theta^{m-2} S_1 + ... + \theta S_{m-2} + S_{m-1},
     fn compress<'a, 'params: 'a, C, P: Params<'params, C>>(
         &self,
-        pk: &ProvingKey<C>,
         params: &P,
         domain: &EvaluationDomain<C::Scalar>,
         theta: ChallengeTheta<C>,
         advice_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
+        selector_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         fixed_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         instance_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         challenges: &'a [C::Scalar],
@@ -67,10 +67,11 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             let compressed_expression = expressions
                 .iter()
                 .map(|expression| {
-                    pk.vk.domain.lagrange_from_vec(evaluate(
+                    domain.lagrange_from_vec(evaluate(
                         expression,
                         params.n() as usize,
                         1,
+                        selector_values,
                         fixed_values,
                         advice_values,
                         instance_values,
@@ -99,7 +100,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
     /// constructs the grand product polynomial over the shuffle.
     /// The grand product polynomial is used to populate the Product<C> struct.
     /// The Product<C> struct is added to the Shuffle and finally returned by the method.
-    pub(in crate::plonk) fn commit_product<
+    pub(crate) fn commit_product<
         'a,
         'params: 'a,
         C,
@@ -109,12 +110,13 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         T: TranscriptWrite<C, E>,
     >(
         &self,
-        pk: &ProvingKey<C>,
         params: &P,
         domain: &EvaluationDomain<C::Scalar>,
+        blinding_factors: usize,
         theta: ChallengeTheta<C>,
         gamma: ChallengeGamma<C>,
         advice_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
+        selector_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         fixed_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         instance_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         challenges: &'a [C::Scalar],
@@ -126,17 +128,15 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         C::Curve: Mul<F, Output = C::Curve> + MulAssign<F>,
     {
         let compressed = self.compress(
-            pk,
             params,
             domain,
             theta,
             advice_values,
+            selector_values,
             fixed_values,
             instance_values,
             challenges,
         );
-
-        let blinding_factors = pk.vk.cs.blinding_factors();
 
         let mut shuffle_product = vec![C::Scalar::ZERO; params.n() as usize];
         parallelize(&mut shuffle_product, |shuffle_product, start| {
@@ -172,7 +172,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             .chain((0..blinding_factors).map(|_| C::Scalar::random(&mut rng)))
             .collect::<Vec<_>>();
         assert_eq!(z.len(), params.n() as usize);
-        let z = pk.vk.domain.lagrange_from_vec(z);
+        let z = domain.lagrange_from_vec(z);
 
         #[cfg(feature = "sanity-checks")]
         {
@@ -193,7 +193,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
 
         let product_blind = Blind(C::Scalar::random(rng));
         let product_commitment = params.commit_lagrange(&z, product_blind).to_affine();
-        let z = pk.vk.domain.lagrange_to_coeff(z);
+        let z = domain.lagrange_to_coeff(z);
 
         // Hash product commitment
         transcript.write_point(product_commitment)?;
@@ -206,13 +206,12 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
 }
 
 impl<C: CurveAffine> Committed<C> {
-    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+    pub(crate) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        pk: &ProvingKey<C>,
+        domain: &EvaluationDomain<C::Scalar>,
         x: ChallengeX<C>,
         transcript: &mut T,
     ) -> Result<Evaluated<C>, Error> {
-        let domain = &pk.vk.domain;
         let x_next = domain.rotate_omega(*x, Rotation::next());
 
         let product_eval = eval_polynomial(&self.product_poly, *x);
@@ -231,12 +230,12 @@ impl<C: CurveAffine> Committed<C> {
 }
 
 impl<C: CurveAffine> Evaluated<C> {
-    pub(in crate::plonk) fn open<'a>(
+    pub(crate) fn open<'a>(
         &'a self,
-        pk: &'a ProvingKey<C>,
+        domain: &'a EvaluationDomain<C::Scalar>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = ProverQuery<'a, C>> + Clone {
-        let x_next = pk.vk.domain.rotate_omega(*x, Rotation::next());
+        let x_next = domain.rotate_omega(*x, Rotation::next());
 
         iter::empty()
             // Open shuffle product commitments at x

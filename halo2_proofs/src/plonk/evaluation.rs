@@ -39,6 +39,8 @@ pub enum ValueSource {
     Constant(usize),
     /// This is an intermediate value
     Intermediate(usize),
+    /// This is a selector column
+    Selector(usize, usize),
     /// This is a fixed column
     Fixed(usize, usize),
     /// This is an advice (witness) column
@@ -72,6 +74,7 @@ impl ValueSource {
         rotations: &[usize],
         constants: &[F],
         intermediates: &[F],
+        selector_values: &[Polynomial<F, B>],
         fixed_values: &[Polynomial<F, B>],
         advice_values: &[Polynomial<F, B>],
         instance_values: &[Polynomial<F, B>],
@@ -85,6 +88,9 @@ impl ValueSource {
         match self {
             ValueSource::Constant(idx) => constants[*idx],
             ValueSource::Intermediate(idx) => intermediates[*idx],
+            ValueSource::Selector(column_index, rotation) => {
+                selector_values[*column_index][rotations[*rotation]]
+            }
             ValueSource::Fixed(column_index, rotation) => {
                 fixed_values[*column_index][rotations[*rotation]]
             }
@@ -132,6 +138,7 @@ impl Calculation {
         rotations: &[usize],
         constants: &[F],
         intermediates: &[F],
+        selector_values: &[Polynomial<F, B>],
         fixed_values: &[Polynomial<F, B>],
         advice_values: &[Polynomial<F, B>],
         instance_values: &[Polynomial<F, B>],
@@ -147,6 +154,7 @@ impl Calculation {
                 rotations,
                 constants,
                 intermediates,
+                selector_values,
                 fixed_values,
                 advice_values,
                 instance_values,
@@ -379,6 +387,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             let idx = start + i;
                             *value = self.custom_gates.evaluate(
                                 &mut eval_data,
+                                &[],
                                 fixed,
                                 advice,
                                 instance,
@@ -503,6 +512,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                         let table_value = lookup_evaluator.evaluate(
                             &mut eval_data,
+                            &[],
                             fixed,
                             advice,
                             instance,
@@ -569,6 +579,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                         let input_value = input_evaluator.evaluate(
                             &mut eval_data_input,
+                            &[],
                             fixed,
                             advice,
                             instance,
@@ -585,6 +596,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                         let shuffle_value = shuffle_evaluator.evaluate(
                             &mut eval_data_shuffle,
+                            &[],
                             fixed,
                             advice,
                             instance,
@@ -688,7 +700,13 @@ impl<C: CurveAffine> GraphEvaluator<C> {
     fn add_expression(&mut self, expr: &Expression<C::ScalarExt>) -> ValueSource {
         match expr {
             Expression::Constant(scalar) => self.add_constant(scalar),
-            Expression::Selector(_selector) => unreachable!(),
+            Expression::Selector(query) => {
+                let rot_idx = self.add_rotation(&Rotation::cur());
+                self.add_calculation(Calculation::Store(ValueSource::Fixed(
+                    query.index(),
+                    rot_idx,
+                )))
+            }
             Expression::Fixed(query) => {
                 let rot_idx = self.add_rotation(&query.rotation);
                 self.add_calculation(Calculation::Store(ValueSource::Fixed(
@@ -798,6 +816,7 @@ impl<C: CurveAffine> GraphEvaluator<C> {
     pub fn evaluate<B: Basis>(
         &self,
         data: &mut EvaluationData<C>,
+        selector: &[Polynomial<C::ScalarExt, B>],
         fixed: &[Polynomial<C::ScalarExt, B>],
         advice: &[Polynomial<C::ScalarExt, B>],
         instance: &[Polynomial<C::ScalarExt, B>],
@@ -822,6 +841,7 @@ impl<C: CurveAffine> GraphEvaluator<C> {
                 &data.rotations,
                 &self.constants,
                 &data.intermediates,
+                selector,
                 fixed,
                 advice,
                 instance,
@@ -848,6 +868,7 @@ pub fn evaluate<F: Field, B: Basis>(
     expression: &Expression<F>,
     size: usize,
     rot_scale: i32,
+    selector: &[Polynomial<F, B>],
     fixed: &[Polynomial<F, B>],
     advice: &[Polynomial<F, B>],
     instance: &[Polynomial<F, B>],
@@ -860,7 +881,7 @@ pub fn evaluate<F: Field, B: Basis>(
             let idx = start + i;
             *value = expression.evaluate(
                 &|scalar| scalar,
-                &|_| panic!("virtual selectors are removed during optimization"),
+                &|query| selector[query.index()][idx],
                 &|query| {
                     fixed[query.column_index]
                         [get_rotation_idx(idx, query.rotation.0, rot_scale, isize)]

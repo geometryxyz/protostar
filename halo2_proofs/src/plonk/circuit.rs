@@ -587,7 +587,6 @@ impl TableColumn {
 pub struct Challenge {
     index: usize,
     pub(crate) phase: sealed::Phase,
-    power: usize,
 }
 
 impl Challenge {
@@ -604,20 +603,6 @@ impl Challenge {
     /// Return Expression
     pub fn expr<F: Field>(&self) -> Expression<F> {
         Expression::Challenge(*self)
-    }
-
-    /// Returns the power to which this challenge is raised
-    pub(crate) fn power(&self) -> usize {
-        self.power
-    }
-
-    /// Returns `self` raised to `power`
-    fn exp(&self, power: usize) -> Self {
-        Self {
-            index: self.index,
-            phase: self.phase,
-            power,
-        }
     }
 }
 
@@ -667,7 +652,7 @@ pub trait Assignment<F: Field> {
     /// Queries the cell of an instance column at a particular absolute row.
     ///
     /// Returns the cell's value, if known.
-    fn query_instance(&mut self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error>;
+    fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error>;
 
     /// Assign an advice column value (witness)
     fn assign_advice<V, VR, A, AR>(
@@ -1278,105 +1263,6 @@ impl<F: Field> Expression<F> {
             &op,
             &|a, _| a,
         )
-    }
-
-    /// Returns the maximum power of challenge that appears in this expression.
-    pub fn max_challenge_power(&self, challenge_index: usize) -> usize {
-        match self {
-            Expression::Challenge(c) => {
-                if c.index() == challenge_index {
-                    c.power()
-                } else {
-                    0
-                }
-            }
-            Expression::Negated(e) => e.max_challenge_power(challenge_index),
-            Expression::Sum(e1, e2) => std::cmp::max(
-                e1.max_challenge_power(challenge_index),
-                e2.max_challenge_power(challenge_index),
-            ),
-            Expression::Product(e1, e2) => {
-                e1.max_challenge_power(challenge_index) + e2.max_challenge_power(challenge_index)
-            }
-            Expression::Scaled(e, _) => e.max_challenge_power(challenge_index),
-            _ => 0,
-        }
-    }
-
-    /// Replaces all products of the same challenge by a single representing the challenge raised to the appropriate function
-    pub fn merge_challenge_products(self) -> Self {
-        // get all unique challenge in the Expression
-        let mut challenges = HashSet::<Challenge>::new();
-        self.traverse(&mut |e| {
-            if let Expression::Challenge(c) = e {
-                challenges.insert(*c);
-            }
-        });
-        debug_assert!(
-            challenges.iter().all(|c| c.power() == 1),
-            "all challenges must have power 1"
-        );
-        // for each challenge, multiply the expression by challenge^0 so the expression remains the same
-        challenges.into_iter().fold(self, |expr, challenge| {
-            expr.multiply_challenge(challenge.exp(0))
-        })
-    }
-
-    /// Multiplies the entire polynomial by a challenge, taking into account the
-    /// powers of the `Challenge`s.
-    /// In the resulting `Expression`, product of the challenge are replaced with a single node,
-    /// raised to the appropriate power.
-    fn multiply_challenge(self, challenge: Challenge) -> Self {
-        match self {
-            Expression::Challenge(c) => {
-                if c.index() == challenge.index() {
-                    // increase the power the challenge node by the accumulated power
-                    let new_power = c.power() + challenge.power();
-                    Expression::Challenge(challenge.exp(new_power))
-                } else {
-                    Expression::Challenge(c)
-                }
-            }
-            Expression::Negated(e) => Expression::Negated(e.multiply_challenge(challenge).into()),
-            Expression::Sum(e1, e2) => Expression::Sum(
-                e1.multiply_challenge(challenge).into(),
-                e2.multiply_challenge(challenge).into(),
-            ),
-            Expression::Product(e1, e2) => {
-                match (*e1, *e2) {
-                    // find a multiplication by a challenge
-                    (Expression::Challenge(c), e) | (e, Expression::Challenge(c)) => {
-                        if c.index() == challenge.index() {
-                            // If either branch is the challenge with power d,
-                            // replace current node with the other branch and
-                            // multiply that branch by c^{new_power}
-                            let new_power = c.power() + challenge.power();
-                            e.multiply_challenge(challenge.exp(new_power))
-                        } else {
-                            Expression::Product(
-                                Expression::Challenge(c).into(),
-                                e.multiply_challenge(challenge).into(),
-                            )
-                        }
-                    }
-                    // Neither banches are challenges -> recurse
-                    (e1, e2) => Expression::Product(
-                        e1.multiply_challenge(challenge).into(),
-                        e2.multiply_challenge(challenge).into(),
-                    ),
-                }
-            }
-            Expression::Scaled(e, v) => {
-                Expression::Scaled(e.multiply_challenge(challenge).into(), v)
-            }
-            v => {
-                if challenge.power() != 0 {
-                    Expression::Product(Expression::Challenge(challenge).into(), v.into())
-                } else {
-                    v
-                }
-            }
-        }
     }
 
     /// Applies `f` to all leaves
@@ -2315,7 +2201,6 @@ impl<F: Field> ConstraintSystem<F> {
         let tmp = Challenge {
             index: self.num_challenges,
             phase,
-            power: 1,
         };
         self.num_challenges += 1;
         self.challenge_phase.push(phase);

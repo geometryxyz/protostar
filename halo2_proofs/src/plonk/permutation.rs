@@ -24,7 +24,7 @@ use std::io;
 #[derive(Debug, Clone)]
 pub struct Argument {
     /// A sequence of columns involved in the argument.
-    pub(super) columns: Vec<Column<Any>>,
+    pub(crate) columns: Vec<Column<Any>>,
 }
 
 impl Argument {
@@ -128,7 +128,7 @@ impl<C: CurveAffine> VerifyingKey<C> {
 pub(crate) struct ProvingKey<C: CurveAffine> {
     permutations: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     polys: Vec<Polynomial<C::Scalar, Coeff>>,
-    pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+    pub(crate) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
 }
 
 impl<C: SerdeCurveAffine> ProvingKey<C>

@@ -27,8 +27,8 @@ pub mod evaluation;
 mod keygen;
 pub(crate) mod lookup;
 pub(crate) mod permutation;
-mod shuffle;
-mod vanishing;
+pub(crate) mod shuffle;
+pub(crate) mod vanishing;
 
 mod prover;
 mod verifier;
@@ -406,21 +406,21 @@ impl<C: CurveAffine> VerifyingKey<C> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Theta;
-type ChallengeTheta<F> = ChallengeScalar<F, Theta>;
+pub(crate) struct Theta;
+pub(crate) type ChallengeTheta<F> = ChallengeScalar<F, Theta>;
 
 #[derive(Clone, Copy, Debug)]
-struct Beta;
-type ChallengeBeta<F> = ChallengeScalar<F, Beta>;
+pub(crate) struct Beta;
+pub(crate) type ChallengeBeta<F> = ChallengeScalar<F, Beta>;
 
 #[derive(Clone, Copy, Debug)]
-struct Gamma;
-type ChallengeGamma<F> = ChallengeScalar<F, Gamma>;
+pub(crate) struct Gamma;
+pub(crate) type ChallengeGamma<F> = ChallengeScalar<F, Gamma>;
 
 #[derive(Clone, Copy, Debug)]
-struct Y;
-type ChallengeY<F> = ChallengeScalar<F, Y>;
+pub(crate) struct Y;
+pub(crate) type ChallengeY<F> = ChallengeScalar<F, Y>;
 
 #[derive(Clone, Copy, Debug)]
-struct X;
-type ChallengeX<F> = ChallengeScalar<F, X>;
+pub(crate) struct X;
+pub(crate) type ChallengeX<F> = ChallengeScalar<F, X>;

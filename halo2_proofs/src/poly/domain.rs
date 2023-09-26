@@ -156,6 +156,18 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
     }
 
+    /// Obtains a polynomial in ExtendedLagrange form when given a vector of ExtendedLagrange
+    /// coefficients of size `extended_n`; panics if the provided vector is the wrong
+    /// length.
+    pub fn extended_from_vec(&self, values: Vec<F>) -> Polynomial<F, ExtendedLagrangeCoeff> {
+        assert_eq!(values.len(), 1 << self.extended_k as usize);
+
+        Polynomial {
+            values,
+            _marker: PhantomData,
+        }
+    }
+
     /// Obtains a polynomial in coefficient form when given a vector of
     /// coefficients of size `n`; panics if the provided vector is the wrong
     /// length.

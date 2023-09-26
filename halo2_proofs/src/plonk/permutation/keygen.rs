@@ -128,10 +128,6 @@ impl Assembly {
         build_pk(params, domain, p, |i, j| self.mapping[i][j])
     }
 
-    pub(crate) fn build_permutations(&mut self, num_rows: usize, p: &Argument) -> Vec<Vec<usize>> {
-        build_permutations(num_rows, p, |i, j| self.mapping[i][j])
-    }
-
     /// Returns columns that participate in the permutation argument.
     pub fn columns(&self) -> &[Column<Any>] {
         &self.columns
@@ -283,11 +279,6 @@ impl Assembly {
         }
     }
 
-    pub(crate) fn build_permutations(&mut self, num_rows: usize, p: &Argument) -> Vec<Vec<usize>> {
-        self.build_ordered_mapping();
-        build_permutations(num_rows, p, |i, j| self.mapping_at_idx(i, j))
-    }
-
     pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
         &mut self,
         params: &P,
@@ -323,28 +314,6 @@ impl Assembly {
                 .map(move |j| self.mapping_at_idx(i, j))
         })
     }
-}
-
-pub(crate) fn build_permutations(
-    n: usize,
-    p: &Argument,
-    mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
-) -> Vec<Vec<usize>> {
-    // Compute permutation polynomials, convert to coset form.
-    let mut permutations = vec![vec![0; n]; p.columns.len()];
-    {
-        parallelize(&mut permutations, |o, start| {
-            for (x, permutation_vec) in o.iter_mut().enumerate() {
-                let col = start + x;
-                for (row, p) in permutation_vec.iter_mut().enumerate() {
-                    let (permuted_col, permuted_row) = mapping(col, row);
-                    *p = n * permuted_col + permuted_row;
-                }
-            }
-        });
-    }
-
-    permutations
 }
 
 pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
