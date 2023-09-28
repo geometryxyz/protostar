@@ -36,22 +36,6 @@ impl<F, CV, FV, WV> Expression<F, CV, FV, WV> {
         }
     }
 
-    /// Applies `f` to all leaves
-    pub fn traverse(&self, f: &mut impl FnMut(&Self)) {
-        match self {
-            Self::Negated(e) => e.traverse(f),
-            Self::Sum(e1, e2) => {
-                e1.traverse(f);
-                e2.traverse(f);
-            }
-            Self::Product(e1, e2) => {
-                e1.traverse(f);
-                e2.traverse(f);
-            }
-            v => f(v),
-        }
-    }
-
     /// Evaluate the polynomial using the provided closures to perform the operations.
     pub fn evaluate<T>(
         &self,
@@ -155,6 +139,7 @@ pub struct ColumnQuery<T> {
 }
 
 impl<T> ColumnQuery<T> {
+    /// For a given row `idx` of a column with `num_rows` rows, return the row index of the rotated column.
     pub fn row_idx(&self, idx: usize, num_rows: usize) -> usize {
         let idx = self.rotation + idx as i32;
         idx.rem_euclid(num_rows as i32) as usize
@@ -162,6 +147,10 @@ impl<T> ColumnQuery<T> {
 }
 
 /// Reference to a challenge variable
+/// TODO: Circuit expressions containing powers of challenges will blow up the degree of the error polynomial.
+/// By substituting powers of a challenge with a symbolic variable, we can reduce the degree of the error polynomial.
+/// This requires the verifier to compute powers of the challenges it sends to the prover,
+/// and treat them as separate challenges during folding.
 #[derive(Clone, Copy, PartialEq)]
 pub struct ChallengeQuery<T> {
     pub value: T,

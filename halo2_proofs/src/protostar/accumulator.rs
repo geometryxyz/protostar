@@ -42,30 +42,72 @@ pub struct Accumulator<C: CurveAffine> {
 }
 
 impl<C: CurveAffine> Accumulator<C> {
+    /// Given two accumulators, run the folding reduction to produce a new accumulator.
+    /// If both input accumulators are correct, the output accumulator will be correct w.h.p. .
     pub fn fold<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         pk: &ProvingKey<C>,
         acc0: Self,
         acc1: Self,
         transcript: &mut T,
     ) -> Self {
+        // Create a data structure containing pairs of committed columns, from which we can compute the constraints to be evaluated.
         let paired_data = Paired::<'_, C::Scalar>::new_data(pk, &acc0, &acc1);
 
+        // Get the full constraint polynomial for the gate and lookups
         let full_constraint = paired_data.full_constraint(pk.cs.gates(), pk.cs.lookups());
 
+        /*
+        Compute the error polynomial e(X) = ∑ᵢ βᵢ * Gᵢ(X)
+        NOTE: There are sevaral optimizations that can be performed at this point:
+        The i-th constraint Gᵢ is given by Gᵢ = ∑ⱼ yⱼ⋅ sⱼ,ᵢ⋅ Gⱼ,ᵢ, where
+          - yⱼ is a challenge for keeping all constraints linearly independent.
+          - sⱼ,ᵢ is a selector for the j-th constraint, which is 1 if the j-th constraint Gⱼ,ᵢ is active at row i,
+            and 0 otherwise.
+          - Gⱼ,ᵢ is the the j-th constraint, resulting from partially evaluating an expression Gⱼ in the the fixed
+            columns of row i.
+
+        - For each constraint Gⱼ, we can compute the polynomial eⱼ(X) = ∑ᵢ βᵢ⋅sⱼ,ᵢ⋅Gⱼ,ᵢ(X) indpendently of the other
+          constraints, and sum them at the end to obtain e(X) = ∑ⱼ yⱼ(X)⋅eⱼ(X).
+        - By checking the selectors, we can skip the evaluation of Gⱼ,ᵢ if it is not active at row i.
+        - The variables of the expression Gⱼ only need to be interpolated upto deg(Gⱼ)+1 rather than deg(e),
+          saving some unnecessary evaluations of Gⱼ.
+        - If a constraint G is linear (i.e. Gᵢ = L₀⋅(wᵢ−1) for checking that w₀ == 1, where L₀ is a fixed column)
+          then the error polynomial for this expression will always be 0, so we can skip the evaluation
+        */
         let error_poly = Paired::<'_, C::Scalar>::evaluate_compressed_polynomial(
             full_constraint,
             pk.usable_rows.clone(),
             pk.num_rows,
         );
+        // Sanity checks for ensuring the error polynomial is correct
+        {
+            let error0 = eval_polynomial(&error_poly, C::Scalar::ZERO);
+            let error1 = eval_polynomial(&error_poly, C::Scalar::ONE);
 
+            assert_eq!(error0, acc0.error);
+            assert_eq!(error1, acc1.error);
+        }
+
+        debug_assert_eq!(error_poly.len(), pk.max_folding_constraints_degree() + 1);
+
+        // Send the coefficients of the error polynomial to the verifier in the clear.
         for coef in &error_poly {
             let _ = transcript.write_scalar(*coef);
         }
-        let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
-        Self::merge(acc0, acc1, error_poly, alpha)
-    }
+        /*
+        Note: The verifier will have to check that e(0) = acc0.error and e(1) = acc1.error.
+        We can instead send the quotient
+                e(X) - (1-t)e(0) - te(1)
+        e'(X) = ------------------------
+                         (1-t)t
+        and let the verifier compute
+        e(α) = (1-α)α⋅e'(α) + (1-α)⋅e₀ + α⋅e₁
+        */
 
-    fn merge(acc0: Self, acc1: Self, error_poly: Vec<C::Scalar>, alpha: C::Scalar) -> Self {
+        // Sample ₀₁, a challenge for computing the interpolation of both accumulators.
+        let alpha = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+        let error = eval_polynomial(&error_poly, alpha);
+
         let gate = gate::Transcript::merge(alpha, acc0.gate, acc1.gate);
         let lookups = zip(acc0.lookups.into_iter(), acc1.lookups.into_iter())
             .map(|(lookup0, lookup1)| lookup::Transcript::merge(alpha, lookup0, lookup1))
@@ -76,14 +118,6 @@ impl<C: CurveAffine> Accumulator<C> {
             .map(|(y0, y1)| y0 + alpha * (y1 - y0))
             .collect();
 
-        let error = eval_polynomial(&error_poly, alpha);
-
-        let error0 = eval_polynomial(&error_poly, C::Scalar::ZERO);
-        let error1 = eval_polynomial(&error_poly, C::Scalar::ONE);
-
-        assert_eq!(error0, acc0.error);
-        assert_eq!(error1, acc1.error);
-
         Self {
             gate,
             lookups,
@@ -93,6 +127,12 @@ impl<C: CurveAffine> Accumulator<C> {
         }
     }
 
+    /// Checks whether the accumulator is valid with regards to the proving key.
+    /// - Check all commitments are correct
+    /// - Check the error term is correct
+    /// - Verify the linear lookup constraints skipped during folding
+    /// - Check the correctness of the beta error vector
+    /// NOTE: Permutation and shuffle constraints are not verified here.
     pub fn decide<'params, P: Params<'params, C>>(
         params: &P,
         pk: &ProvingKey<C>,
@@ -145,6 +185,7 @@ impl<C: CurveAffine> Accumulator<C> {
         committed_ok && error_ok && lookups_ok && beta_ok
     }
 
+    /// Recompute the compressed error term e = ∑ᵢ βᵢ * Gᵢ
     pub fn error(pk: &ProvingKey<C>, acc: &Self) -> C::Scalar {
         let lagrange_data = Data::<CommittedRef<'_, C>>::new(&pk, &acc);
 
@@ -165,6 +206,6 @@ impl<C: CurveAffine> Accumulator<C> {
                 );
             }
         });
-        error.into_iter().sum()
+        error.iter().sum()
     }
 }
