@@ -82,7 +82,6 @@ impl<'a, F: Field> Paired<'a, F> {
             beta,
             lookups,
             ys,
-            num_rows: pk.num_rows,
         }
     }
 

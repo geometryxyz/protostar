@@ -60,7 +60,6 @@ impl<'a, C: CurveAffine> Data<CommittedRef<'a, C>> {
             beta,
             lookups,
             ys,
-            num_rows: pk.num_rows,
         }
     }
 }

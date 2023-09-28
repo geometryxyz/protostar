@@ -37,7 +37,7 @@ pub struct ProvingKey<C: CurveAffine> {
     // Fixed columns
     pub fixed: Vec<Committed<C>>,
     pub selectors: Vec<Committed<C>>,
-    pub(crate) permutation_pk: permutation::ProvingKey<C>,
+
 }
 
 impl<C: CurveAffine> ProvingKey<C> {
@@ -127,9 +127,6 @@ impl<C: CurveAffine> ProvingKey<C> {
         //         .map(|poly| domain.lagrange_from_vec(poly)),
         // );
 
-        let permutation_pk = assembly
-            .permutation
-            .build_pk(params, &domain, cs.permutation());
 
         Ok(ProvingKey {
             domain,
@@ -138,7 +135,6 @@ impl<C: CurveAffine> ProvingKey<C> {
             cs,
             fixed,
             selectors,
-            permutation_pk,
         })
     }
 

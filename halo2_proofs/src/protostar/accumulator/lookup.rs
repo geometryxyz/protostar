@@ -105,7 +105,7 @@ pub fn new<
         .zip(m_committed.into_iter())
         .map(|(lookup, m)| {
             let num_inputs = lookup.input_expressions.len();
-            let thetas = powers(theta).skip(1).take(num_inputs).collect::<Vec<_>>();
+            let thetas = powers(theta).take(num_inputs).collect::<Vec<_>>();
 
             let g_column = pk.domain.lagrange_from_vec(build_g(
                 lookup,

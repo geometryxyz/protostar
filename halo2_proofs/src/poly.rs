@@ -85,15 +85,6 @@ pub(crate) fn empty_lagrange_assigned<F: ff::Field>(
         _marker: PhantomData,
     }
 }
-/// Obtains a polynomial in Lagrange form when given a vector of Lagrange
-/// coefficients of size `n`; panics if the provided vector is the wrong
-/// length.
-pub(crate) fn lagrange_from_vec<F: ff::Field>(values: Vec<F>) -> Polynomial<F, LagrangeCoeff> {
-    Polynomial {
-        values,
-        _marker: PhantomData,
-    }
-}
 
 impl<F, B> Index<usize> for Polynomial<F, B> {
     type Output = F;

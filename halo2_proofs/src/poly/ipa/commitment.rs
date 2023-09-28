@@ -94,26 +94,14 @@ impl<'params, C: CurveAffine> Params<'params, C> for ParamsIPA<C> {
         poly: &Polynomial<C::Scalar, LagrangeCoeff>,
         r: Blind<C::Scalar>,
     ) -> C::Curve {
-        println!("DEBUG :: poly.len: {:?}", poly.len());
         let mut tmp_scalars = Vec::with_capacity(poly.len() + 1);
         let mut tmp_bases = Vec::with_capacity(poly.len() + 1);
 
         tmp_scalars.extend(poly.iter());
         tmp_scalars.push(r.0);
 
-        println!("DEBUG :: g_lagrange.len: {:?}", self.g_lagrange.len());
-        // for item in self.g_lagrange.iter() {
-        //     if tmp_bases.len() < poly.len() {
-        //         tmp_bases.push(*item);
-        //     } else {
-        //         break; // Stop adding when capacity is reached
-        //     }
-        // }
         tmp_bases.extend(self.g_lagrange.iter());
         tmp_bases.push(self.w);
-        println!("DEBUG :: tmp_bases.len: {:?}", tmp_bases.len());
-
-        println!("DEBUG :: tmp_scalars.len: {:?}", tmp_scalars.len());
 
         best_multiexp::<C>(&tmp_scalars, &tmp_bases)
     }

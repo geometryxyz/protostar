@@ -4,5 +4,6 @@ pub mod accumulator;
 mod constraints;
 mod keygen;
 pub mod prover;
+pub mod verifier;
 
 pub use keygen::ProvingKey;

@@ -7,13 +7,7 @@ use std::{
     iter::zip,
 };
 
-use super::transcript::{
-    advice::AdviceTranscript,
-    compressed_verifier::CompressedVerifierTranscript,
-    instance::InstanceTranscript,
-    lookup::{LookupTranscipt, LookupTranscriptSingle},
-};
-use super::{error_check::Accumulator, keygen::ProvingKey, row_evaluator::RowEvaluator};
+use super::{accumulator::Accumulator, keygen::ProvingKey};
 use crate::arithmetic::{
     best_multiexp, compute_inner_product, eval_polynomial, parallelize, powers,
 };
@@ -31,22 +25,25 @@ use rayon::prelude::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
 
-const BETA_POLY_DEGREE: usize = 1;
+#[derive(Debug, Clone, PartialEq)]
+pub struct LookupAccumulator<C: CurveAffine> {
+    pub m: C,
+    pub r: C::Scalar,
+    pub thetas: Vec<C::Scalar>,
+    pub g: C,
+    pub h: C,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifierAccumulator<C: CurveAffine> {
-    pub instance_commitments: Vec<C::Scalar>,
-    pub challenges: Vec<Vec<C::Scalar>>,
-    pub advice_commitments: Vec<C>,
-    // thetas: Option<Vec<C::Scalar>>,
-    // r: Option<C::Scalar>,
-    // singles_transcript: Vec<LookupTranscriptSingle<C>>,
-    pub m_commitments: Vec<C>,
-    pub g_commitments: Vec<C>,
-    pub h_commitments: Vec<C>,
+    pub instance: Vec<Vec<C::Scalar>>,
+    pub advice: Vec<C>,
+    pub challenges: Vec<C::Scalar>,
+    pub lookup_accumulators: Vec<LookupAccumulator<C>>,
+    pub beta: C::Scalar,
     pub beta_commitment: C,
-    pub y: C::Scalar,
-    pub constraint_errors: Vec<C::Scalar>,
+    pub beta_error: C,
+    pub ys: Vec<C::Scalar>,
     pub error: C::Scalar,
 }
 
@@ -57,7 +54,6 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         instances: &[&[C::Scalar]],
         // TODO(@gnosed): replace pk with vk: VerifiyingKey<C>
         pk: &ProvingKey<C>,
-        // TODO(@gnosed): remove accumulator when testing is correct
     ) -> Result<Self, Error> {
         //
         // Get instance commitments
@@ -67,11 +63,16 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             return Err(Error::InvalidInstances);
         }
 
-        let mut instance_commitments = vec![C::Scalar::ZERO; instances.len()];
-
-        for instance_commitment in instance_commitments.iter_mut() {
-            *instance_commitment = transcript.read_scalar()?;
+        for instance in instances.iter() {
+            for value in instance.iter() {
+                transcript.common_scalar(*value)?;
+            }
         }
+
+        let instance: Vec<_> = instances
+            .into_iter()
+            .map(|instance| instance.to_vec())
+            .collect();
 
         // Hash verification key into transcript
         // TODO(@gnosed): is it necessary? If yes, change it when the VerifyingKey was implemented
@@ -88,7 +89,7 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         //
         // Get advice commitments and challenges
         //
-        let (advice_commitments, challenges) = {
+        let (advice, challenges) = {
             let mut advice_commitments = vec![C::identity(); pk.cs.num_advice_columns];
             let mut challenges = vec![C::Scalar::ZERO; pk.cs.num_challenges];
 
@@ -112,57 +113,61 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
 
             (advice_commitments, challenges)
         };
-
-        let challenge_degrees = pk.max_challenge_powers();
-
-        let challenges = challenges
-            .into_iter()
-            .zip(challenge_degrees)
-            .map(|(c, d)| powers(c).skip(1).take(d).collect::<Vec<_>>())
-            .collect::<Vec<_>>();
         //
         // Get lookup commitments to m(x), g(x) and h(x) polys
         //
-        let lookups = pk.cs().lookups();
-        let num_lookups = lookups.len();
+        let num_lookups = pk.cs.lookups.len();
 
+        // Read all commitments m_i(X)
         let mut m_commitments = vec![C::identity(); num_lookups];
         for m_commitment in m_commitments.iter_mut() {
             *m_commitment = transcript.read_point()?;
         }
 
-        let mut g_commitments = vec![C::identity(); num_lookups];
-        for g_commitment in g_commitments.iter_mut() {
-            *g_commitment = transcript.read_point()?;
-        }
+        // Get challenge r, theta
+        let [r, theta] = [(); 2].map(|_| *transcript.squeeze_challenge_scalar::<C::Scalar>());
 
-        let mut h_commitments = vec![C::identity(); num_lookups];
-        for h_commitment in h_commitments.iter_mut() {
-            *h_commitment = transcript.read_point()?;
-        }
+        // Get h_i(X), g_i(X) from the transcript for each lookup
+        let lookup_accumulators: Vec<_> = pk
+            .cs
+            .lookups
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+                let num_thetas = arg.input_expressions().len();
+                let thetas: Vec<_> = powers(theta).take(num_thetas).collect();
+                let g_commitment = transcript.read_point()?;
+                let h_commitment = transcript.read_point()?;
+                Ok(LookupAccumulator {
+                    m: m_commitments[i],
+                    r,
+                    thetas,
+                    g: g_commitment,
+                    h: h_commitment,
+                })
+            })
+            .collect::<Result<Vec<LookupAccumulator<C>>, Error>>()?;
+
         //
         // Get beta commitment
         //
-        let _beta = *transcript.squeeze_challenge_scalar::<C::Scalar>();
+        let beta = *transcript.squeeze_challenge_scalar::<C::Scalar>();
         let beta_commitment = transcript.read_point()?;
+        let beta_error = C::identity();
 
         // Challenge for the RLC of all constraints (all gates and all lookups)
         let y = *transcript.squeeze_challenge_scalar::<C::Scalar>();
-
-        let num_constraints = pk.num_folding_constraints();
-
-        let constraint_errors = vec![C::Scalar::ZERO; num_constraints];
+        let ys: Vec<C::Scalar> = powers(y).take(pk.num_folding_constraints()).collect();
 
         Ok(VerifierAccumulator {
-            instance_commitments,
+            instance,
+            advice,
             challenges,
-            advice_commitments,
+            beta,
             beta_commitment,
-            m_commitments,
-            g_commitments,
-            h_commitments,
-            y,
-            constraint_errors,
+            beta_error,
+            lookup_accumulators,
+            ys,
             error: C::Scalar::ZERO,
         })
     }
@@ -173,28 +178,10 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
         transcript: &mut T,
     ) {
         //
-        // Compute the number of constraints in each gate as well as the total number of constraints in all gates.
-        //
-        let gates_error_polys_num_evals: Vec<Vec<usize>> = pk
-            .folding_constraints()
-            .iter()
-            .map(|polys| {
-                polys
-                    .iter()
-                    .map(|poly| poly.folding_degree() + BETA_POLY_DEGREE + 1)
-                    .collect()
-            })
-            .collect();
-
-        let max_gate_num_evals = gates_error_polys_num_evals
-            .iter()
-            .flat_map(|gates_num_evals| gates_num_evals.iter())
-            .max()
-            .unwrap();
-        //
         // Get error commitments
+        // (We subtract 2 since we expect the quotient of the error polynomial)
         //
-        let final_error_poly_len = max_gate_num_evals + 1;
+        let final_error_poly_len = pk.max_folding_constraints_degree() + 1;
         // Prover doesn't send the first two coefficient since Verifier already know e(0) and e(1)
         let quotient_final_error_poly_len = final_error_poly_len - 2;
 
@@ -211,6 +198,13 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             + alpha * acc1.error;
         self.error = final_error;
 
+        // Fold instances
+        for (instance0, instance1) in zip(self.instance.iter_mut(), acc1.instance.iter()) {
+            for (i0, i1) in zip(instance0.iter_mut(), instance1.iter()) {
+                *i0 = (*i1 - *i0) * i1 + *i0;
+            }
+        }
+
         // Fold all commitments
         fn fold_commitments<C: CurveAffine>(
             self_commitments: &mut Vec<C>,
@@ -222,26 +216,53 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             }
         }
 
-        fold_commitments(
-            &mut self.advice_commitments,
-            &acc1.advice_commitments,
-            alpha,
-        );
-        fold_commitments(&mut self.m_commitments, &acc1.m_commitments, alpha);
-        fold_commitments(&mut self.g_commitments, &acc1.g_commitments, alpha);
-        fold_commitments(&mut self.h_commitments, &acc1.h_commitments, alpha);
+        fold_commitments(&mut self.advice, &acc1.advice, alpha);
 
-        self.beta_commitment = ((acc1.beta_commitment - self.beta_commitment) * alpha
+        for (self_lookup, acc1_lookup) in zip(
+            self.lookup_accumulators.iter_mut(),
+            acc1.lookup_accumulators.iter(),
+        ) {
+            self_lookup.m = ((acc1_lookup.m - self_lookup.m) * alpha + self_lookup.m).to_affine();
+            self_lookup.g = ((acc1_lookup.g - self_lookup.g) * alpha + self_lookup.g).to_affine();
+            self_lookup.h = ((acc1_lookup.h - self_lookup.h) * alpha + self_lookup.h).to_affine();
+
+            self_lookup.r = (acc1_lookup.r - self_lookup.r) * alpha + self_lookup.r;
+
+            for (theta0, theta1) in zip(self_lookup.thetas.iter_mut(), acc1_lookup.thetas.iter()) {
+                *theta0 = (*theta1 - *theta0) * alpha + *theta0;
+            }
+        }
+
+        // Compute commitment to error vector for beta commitment correctness
+        self.beta_error = {
+            let error0 = self.beta_error;
+            let error1 = acc1.beta_error;
+            let beta_com0 = self.beta_commitment;
+            let beta_com1 = acc1.beta_commitment;
+            let beta0 = self.beta;
+            let beta1 = acc1.beta;
+            let error_quotient = beta_com0 * (beta1 - beta0) + beta_com1 * (beta0 - beta1);
+            (error0 * (C::Scalar::ONE - alpha)
+                + error1 * C::Scalar::ONE
+                + error_quotient * ((C::Scalar::ONE - alpha) * alpha))
+                .to_affine()
+        };
+
+        // fold beta challenge
+        self.beta = (acc1.beta - self.beta) * alpha
+            + self.beta;
+
+            self.beta_commitment = ((acc1.beta_commitment - self.beta_commitment) * alpha
             + self.beta_commitment)
             .to_affine();
 
         // Fold all challenges
-        for (self_challenges, acc1_challenges) in
-            zip(self.challenges.iter_mut(), acc1.challenges.iter())
-        {
-            for (self_c, acc1_c) in zip(self_challenges, acc1_challenges) {
-                *self_c = (*acc1_c - *self_c) * alpha + *self_c;
-            }
+        for (self_c, acc1_c) in zip(self.challenges.iter_mut(), acc1.challenges.iter()) {
+            *self_c = (*acc1_c - *self_c) * alpha + *self_c;
+        }
+        // fold ys challenges
+        for (y0, y1) in zip(self.ys.iter_mut(), acc1.ys.iter()) {
+            *y0 = (*y1 - *y0) * alpha + *y0;
         }
     }
 }
@@ -266,14 +287,14 @@ mod tests {
             VerificationStrategy,
         },
         protostar,
-        protostar::error_check::Accumulator,
-        protostar::verifier::VerifierAccumulator,
+        protostar::accumulator::Accumulator,
+        protostar::verifier::{LookupAccumulator, VerifierAccumulator},
         transcript::{
             Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer,
         },
     };
 
-    use halo2curves::pasta::{pallas, Fp, self};
+    use halo2curves::pasta::{self, pallas, Fp};
     use rand_core::{OsRng, RngCore};
     use std::{
         iter::{self, zip},
@@ -688,38 +709,56 @@ mod tests {
         v_acc: VerifierAccumulator<C>,
         p_acc: Accumulator<C>,
     ) {
+        for (col, instance) in v_acc.instance.iter().enumerate() {
+            for (row, v_instance_value) in instance.iter().enumerate() {
+                let p_instance_value = p_acc.gate.instance[col].values[row];
+                assert_eq!(
+                    *v_instance_value, p_instance_value,
+                    "V and P instance at col {col} and row {row} are NOT EQUAL"
+                )
+            }
+        }
         assert_eq!(
-            p_acc.instance_transcript.verifier_instance_commitments, v_acc.instance_commitments,
-            "V and P Instance Transcripts NOT EQUAL"
-        );
-        assert_eq!(
-            p_acc.advice_transcript.advice_commitments, v_acc.advice_commitments,
+            p_acc
+                .gate
+                .advice
+                .iter()
+                .map(|c| c.commitment)
+                .collect::<Vec<C>>(),
+            v_acc.advice,
             "V and P Advice Transcripts NOT EQUAL"
         );
         assert_eq!(
-            p_acc.advice_transcript.challenges, v_acc.challenges,
+            p_acc.gate.challenges, v_acc.challenges,
             "V and P Advice Challenges NOT EQUAL"
         );
         assert_eq!(
-            p_acc.lookup_transcript.singles_transcript.len(),
-            v_acc.m_commitments.len(),
-            "V and P m(x) Commitments NOT EQUAL"
+            p_acc
+                .lookups
+                .iter()
+                .map(|v| LookupAccumulator {
+                    m: v.m.commitment,
+                    r: v.r,
+                    thetas: v.thetas.clone(),
+                    g: v.g.commitment,
+                    h: v.h.commitment
+                })
+                .collect::<Vec<LookupAccumulator<C>>>(),
+            v_acc.lookup_accumulators
         );
         assert_eq!(
-            p_acc.lookup_transcript.singles_transcript.len(),
-            v_acc.g_commitments.len(),
-            "V and P g(x) Commitments NOT EQUAL"
+            p_acc.beta.beta.values[1], v_acc.beta,
+            "V and P Beta challenge NOT EQUAL"
         );
         assert_eq!(
-            p_acc.lookup_transcript.singles_transcript.len(),
-            v_acc.h_commitments.len(),
-            "V and P h(x) Commitments NOT EQUAL"
+            p_acc.beta.error.commitment, v_acc.beta_error,
+            "V and P Beta error NOT EQUAL"
         );
         assert_eq!(
-            p_acc.compressed_verifier_transcript.beta_commitment, v_acc.beta_commitment,
+            p_acc.beta.beta.commitment, v_acc.beta_commitment,
             "V and P Beta Commitment NOT EQUAL"
         );
-        assert_eq!(p_acc.y, v_acc.y, "V and P Y challenge NOT EQUAL");
+        assert_eq!(p_acc.ys, v_acc.ys, "V and P Y challenge NOT EQUAL");
         assert_eq!(p_acc.error, v_acc.error, "V and P Error NOT EQUAL");
     }
 
@@ -754,6 +793,44 @@ mod tests {
         let v_acc = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
 
         check_v_and_p_transcripts(v_acc, p_acc);
+    }
+
+    #[test]
+    fn test_same_acc_fold() {
+        let mut rng: OsRng = OsRng;
+
+        const W: usize = 4;
+        const H: usize = 32;
+        const K: u32 = 8;
+
+        let params = poly::ipa::commitment::ParamsIPA::<pallas::Affine>::new(K);
+
+        let circuit = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
+
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        let pk = protostar::ProvingKey::new(&params, &circuit).unwrap();
+
+        let p_acc = protostar::prover::create_accumulator(
+            &params,
+            &pk,
+            &circuit,
+            &[],
+            &mut rng,
+            &mut transcript,
+        )
+        .unwrap();
+
+        let p_acc1 = Accumulator::fold(&pk, p_acc.clone(), p_acc.clone(), &mut transcript);
+
+        let proof: Vec<u8> = transcript.finalize();
+
+        let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+        let v_acc = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
+        let mut v_acc1 = v_acc.clone();
+
+        v_acc1.fold(&v_acc, &pk, &mut v_transcript);
+
+        check_v_and_p_transcripts(v_acc1, p_acc1);
     }
 
     #[test]
@@ -819,7 +896,7 @@ mod tests {
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         let pk = protostar::ProvingKey::new(&params, &circuit0).unwrap();
 
-        let mut acc0 = protostar::prover::create_accumulator(
+        let acc0 = protostar::prover::create_accumulator(
             &params,
             &pk,
             &circuit0,
@@ -838,22 +915,20 @@ mod tests {
         )
         .unwrap();
 
-        let acc0_old = acc0.clone();
-
-        acc0.fold(&pk, acc1.clone(), &mut transcript);
+        let acc2 = Accumulator::fold(&pk, acc0.clone(), acc1.clone(), &mut transcript);
 
         let proof: Vec<u8> = transcript.finalize();
         let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
 
-        let mut v_acc0 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
+        let v_acc0 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
         let v_acc1 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
-        let v_acc0_old = v_acc0.clone();
+        let mut v_acc2 = v_acc0.clone();
 
-        v_acc0.fold(&v_acc1.clone(), &pk, &mut v_transcript);
+        v_acc2.fold(&v_acc1.clone(), &pk, &mut v_transcript);
 
-        check_v_and_p_transcripts(v_acc0_old, acc0_old);
-        check_v_and_p_transcripts(v_acc1, acc1);
         check_v_and_p_transcripts(v_acc0, acc0);
+        check_v_and_p_transcripts(v_acc1, acc1);
+        check_v_and_p_transcripts(v_acc2, acc2);
     }
 
     #[test]
@@ -862,7 +937,7 @@ mod tests {
         const K: u32 = 9;
         const RANGE: usize = 8; // 3-bit value
         const LOOKUP_RANGE: usize = 256; // 8-bit value
-        
+
         let params = poly::ipa::commitment::ParamsIPA::<pallas::Affine>::new(K);
 
         let circuit0 = RangeCheckCircuit::<pallas::Scalar, RANGE, LOOKUP_RANGE> {
@@ -875,17 +950,6 @@ mod tests {
             lookup_value: Value::known(pallas::Scalar::from(220).into()),
         };
 
-        // let params = poly::kzg::commitment::ParamsKZG::<halo2curves::bn256::Bn256>::new(K);
-        // let circuit0 = RangeCheckCircuit::<pallas::Scalar, RANGE, LOOKUP_RANGE> {
-        //     value: Value::known(halo2curves::bn256::Fq::from(4).into()),
-        //     lookup_value: Value::known(pasta::Fq::from(12).into()),
-        // };
-
-        // let circuit1 = RangeCheckCircuit::<pallas::Scalar, RANGE, LOOKUP_RANGE> {
-        //     value: Value::known(pasta::Fq::from(5).into()),
-        //     lookup_value: Value::known(pasta::Fq::from(220).into()),
-        // };
-
         let prover0 = MockProver::run(K, &circuit0, vec![]).unwrap();
         let prover1 = MockProver::run(K, &circuit1, vec![]).unwrap();
 
@@ -895,7 +959,7 @@ mod tests {
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         let pk = protostar::ProvingKey::new(&params, &circuit0).unwrap();
 
-        let mut acc0 = protostar::prover::create_accumulator(
+        let acc0 = protostar::prover::create_accumulator(
             &params,
             &pk,
             &circuit0,
@@ -904,31 +968,29 @@ mod tests {
             &mut transcript,
         )
         .unwrap();
-        // let acc1 = protostar::prover::create_accumulator(
-        //     &params,
-        //     &pk,
-        //     &circuit1,
-        //     &[],
-        //     &mut rng,
-        //     &mut transcript,
-        // )
-        // .unwrap();
+        let acc1 = protostar::prover::create_accumulator(
+            &params,
+            &pk,
+            &circuit1,
+            &[],
+            &mut rng,
+            &mut transcript,
+        )
+        .unwrap();
 
-        // let acc0_old = acc0.clone();
+        let acc2 = Accumulator::fold(&pk, acc0.clone(), acc1.clone(), &mut transcript);
 
-        // acc0.fold(&pk, acc1.clone(), &mut transcript);
+        let proof: Vec<u8> = transcript.finalize();
+        let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
 
-        // let proof: Vec<u8> = transcript.finalize();
-        // let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+        let v_acc0 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
+        let v_acc1 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
+        let mut v_acc2 = v_acc0.clone();
 
-        // let mut v_acc0 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
-        // let v_acc1 = VerifierAccumulator::new_from_prover(&mut v_transcript, &[], &pk).unwrap();
-        // let v_acc0_old = v_acc0.clone();
+        v_acc2.fold(&v_acc1.clone(), &pk, &mut v_transcript);
 
-        // v_acc0.fold(&v_acc1.clone(), &pk, &mut v_transcript);
-
-        // check_v_and_p_transcripts(v_acc0_old, acc0_old);
-        // check_v_and_p_transcripts(v_acc1, acc1);
-        // check_v_and_p_transcripts(v_acc0, acc0);
+        check_v_and_p_transcripts(v_acc0, acc0);
+        check_v_and_p_transcripts(v_acc1, acc1);
+        check_v_and_p_transcripts(v_acc2, acc2);
     }
 }

@@ -1,15 +1,15 @@
-use ff::{BatchInvert, FromUniformBytes};
+use ff::BatchInvert;
 use halo2_proofs::{
     arithmetic::Field,
     circuit::{floor_planner::V1, Layouter, Value},
     plonk::*,
-    poly::{self, commitment::ParamsProver, VerificationStrategy},
+    poly::{self, commitment::ParamsProver},
     protostar::{
         self,
         accumulator::Accumulator,
         // decider::create_proof,
     },
-    transcript::{Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer},
+    transcript::{Blake2bWrite, Challenge255,  TranscriptWriterBuffer},
 };
 use halo2curves::pasta::pallas;
 use rand_core::{OsRng, RngCore};
@@ -252,7 +252,6 @@ fn main() {
 
     let circuit1 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
     let circuit2 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
-    let circuit3 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
 
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
     let pk = protostar::ProvingKey::new(&params, &circuit1).unwrap();

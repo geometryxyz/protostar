@@ -79,19 +79,27 @@ impl<C: CurveAffine> Accumulator<C> {
             pk.usable_rows.clone(),
             pk.num_rows,
         );
-        // Sanity checks for ensuring the error polynomial is correct
-        {
-            let error0 = eval_polynomial(&error_poly, C::Scalar::ZERO);
-            let error1 = eval_polynomial(&error_poly, C::Scalar::ONE);
-
-            assert_eq!(error0, acc0.error);
-            assert_eq!(error1, acc1.error);
-        }
 
         debug_assert_eq!(error_poly.len(), pk.max_folding_constraints_degree() + 1);
 
+        let error_poly_quotient = {
+            let error0 = eval_polynomial(&error_poly, C::Scalar::ZERO);
+            let error1 = eval_polynomial(&error_poly, C::Scalar::ONE);
+
+            // Sanity checks for ensuring the error polynomial is correct
+
+            assert_eq!(error0, acc0.error);
+            assert_eq!(error1, acc1.error);
+
+            let mut error_poly_vanish = error_poly.clone();
+            // subtract (1-t)e0 + te1 = e0 + t(e1-e0)
+            error_poly_vanish[0] -= error0;
+            error_poly_vanish[1] -= error1-error0;
+            quotient_by_boolean_vanishing(&error_poly_vanish)
+        };
+
         // Send the coefficients of the error polynomial to the verifier in the clear.
-        for coef in &error_poly {
+        for coef in &error_poly_quotient {
             let _ = transcript.write_scalar(*coef);
         }
         /*
@@ -208,4 +216,29 @@ impl<C: CurveAffine> Accumulator<C> {
         });
         error.iter().sum()
     }
+}
+
+// Given a polynomial p(X) of degree d > 1, compute its quotient q(X)
+// such that p(X) = (1-X)X⋅q(X).
+// Panics if deg(p) ≤ 1 or if p(0) ≠ 0 or p(1) ≠ 0
+fn quotient_by_boolean_vanishing<F: Field>(poly: &[F]) -> Vec<F> {
+    let n = poly.len();
+    assert!(n >= 2, "deg(poly) < 2");
+    assert!(poly[0].is_zero_vartime(), "poly(0) != 0");
+
+    let mut tmp = F::ZERO;
+
+    let mut quotient = vec![F::ZERO; n - 2];
+    for i in 0..(n - 2) {
+        tmp += poly[i + 1];
+        quotient[i] = tmp;
+    }
+
+    // p(1) = ∑p_i = 0
+    assert_eq!(
+        *quotient.last().unwrap(),
+        poly.last().unwrap().neg(),
+        "poly(1) != 0"
+    );
+    quotient
 }
