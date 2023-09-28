@@ -16,6 +16,7 @@ pub(crate) mod expression;
 pub(crate) mod paired;
 pub(crate) mod polynomial;
 
+///
 pub struct Data<T: QueryType> {
     fixed: Vec<T::Fixed>,
     selectors: Vec<T::Fixed>,

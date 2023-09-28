@@ -21,6 +21,8 @@ use halo2curves::CurveAffine;
 /// the Beta transcript allows all constraints to be batched into a single one.
 /// The verifer sends a random value beta, and the prover commits to the vector of powers of beta.
 /// The constraint to be checked becomes ∑ᵢ βᵢ ⋅ Gᵢ.
+/// We need to compute the committed error vector for checking the correctness of beta, but
+/// we can let the verifier compute it.
 #[derive(PartialEq, Debug, Clone)]
 pub struct Transcript<C: CurveAffine> {
     pub beta: Committed<C>,
@@ -51,6 +53,8 @@ impl<C: CurveAffine> Transcript<C> {
         // No need to blind since the contents are known by the verifier
         let committed = commit_transparent(params, beta_values, transcript);
 
+        // During the creation of an initial accumulator, the error is expecte to be zero
+        // It does not need to be committed since the verifier will set the commitment to the identity.
         let error = Committed {
             values: empty_lagrange(n as usize),
             commitment: C::identity(),
@@ -64,8 +68,10 @@ impl<C: CurveAffine> Transcript<C> {
     }
 
     pub(super) fn merge(alpha: C::Scalar, transcript0: Self, transcript1: Self) -> Self {
+        // Get the actual beta challenge from the vectors
         let beta0 = transcript0.beta.values[1];
         let beta1 = transcript1.beta.values[1];
+        // Compute the linear interpolation of both beta values
         let beta = Committed::merge(alpha, transcript0.beta.clone(), transcript1.beta.clone());
 
         // The error is given by e = r⋅a - b, where r is a challenge and a,b are vectors.
