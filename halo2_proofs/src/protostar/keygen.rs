@@ -23,7 +23,7 @@ use crate::{
 use super::accumulator::committed::{batch_commit_transparent, Committed};
 
 /// Contains all fixed data for a circuit that is required to create a Protostar `Accumulator`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProvingKey<C: CurveAffine> {
     pub domain: EvaluationDomain<C::Scalar>,
     // maximum number of rows in the trace (including blinding factors)
@@ -37,7 +37,6 @@ pub struct ProvingKey<C: CurveAffine> {
     // Fixed columns
     pub fixed: Vec<Committed<C>>,
     pub selectors: Vec<Committed<C>>,
-
 }
 
 impl<C: CurveAffine> ProvingKey<C> {
@@ -126,7 +125,6 @@ impl<C: CurveAffine> ProvingKey<C> {
         //         .into_iter()
         //         .map(|poly| domain.lagrange_from_vec(poly)),
         // );
-
 
         Ok(ProvingKey {
             domain,

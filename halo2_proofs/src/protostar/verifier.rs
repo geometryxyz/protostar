@@ -7,7 +7,10 @@ use std::{
     iter::zip,
 };
 
-use super::{accumulator::Accumulator, keygen::ProvingKey};
+use super::{
+    accumulator::{self, Accumulator},
+    keygen::ProvingKey,
+};
 use crate::arithmetic::{
     best_multiexp, compute_inner_product, eval_polynomial, parallelize, powers,
 };
@@ -47,6 +50,59 @@ pub struct VerifierAccumulator<C: CurveAffine> {
     pub error: C::Scalar,
 }
 
+impl<C: CurveAffine> PartialEq<accumulator::Accumulator<C>> for VerifierAccumulator<C> {
+    fn eq(&self, other: &accumulator::Accumulator<C>) -> bool {
+        let instance_ok = {
+            let len_ok = self.instance.len() == other.gate.instance.len();
+            let values_ok = self
+                .instance
+                .iter()
+                .zip(other.gate.instance.iter())
+                .all(|(a, b)| a.iter().zip(b.values.iter()).all(|(a, b)| a == b));
+
+            len_ok && values_ok
+        };
+        let advice_ok = {
+            let len_advice_ok = self.advice.len() == other.gate.advice.len();
+            let len_challenges_ok = self.challenges.len() == other.gate.challenges.len();
+
+            let commitments_ok = self
+                .advice
+                .iter()
+                .zip(other.gate.advice.iter())
+                .all(|(a, b)| *a == b.commitment);
+
+            len_advice_ok && len_challenges_ok && commitments_ok
+        };
+        let lookup_ok = {
+            let len_ok = self.lookup_accumulators.len() == other.lookups.len();
+            let commitments_ok = self
+                .lookup_accumulators
+                .iter()
+                .zip(other.lookups.iter())
+                .all(|(a, b)| {
+                    a.m == b.m.commitment
+                        && a.r == b.r
+                        && a.thetas == b.thetas
+                        && a.g == b.g.commitment
+                        && a.h == b.h.commitment
+                });
+
+            len_ok && commitments_ok
+        };
+
+        let beta_ok = {
+            self.beta == other.beta.beta.values[1]
+                && self.beta_commitment == other.beta.beta.commitment
+                && self.beta_error == other.beta.error.commitment
+        };
+
+        let ys_ok = self.ys == other.ys;
+        let error_ok = self.error == other.error;
+
+        instance_ok && advice_ok && lookup_ok && beta_ok && ys_ok && error_ok
+    }
+}
 
 impl<C: CurveAffine> VerifierAccumulator<C> {
     /// Create a new `VerifierAccumulator` by reading the IOP transcripts from the Prover and save commitments and challenges
@@ -70,10 +126,7 @@ impl<C: CurveAffine> VerifierAccumulator<C> {
             }
         }
 
-        let instance: Vec<_> = instances
-            .into_iter()
-            .map(|instance| instance.to_vec())
-            .collect();
+        let instance: Vec<_> = instances.iter().map(|instance| instance.to_vec()).collect();
 
         // Hash verification key into transcript
         // TODO(@gnosed): is it necessary? If yes, change it when the VerifyingKey was implemented
@@ -677,6 +730,7 @@ mod tests {
     impl<F: PrimeFieldBits, const RANGE: usize, const LOOKUP_RANGE: usize> Circuit<F>
         for RangeCheckCircuit<F, RANGE, LOOKUP_RANGE>
     {
+        type Params = ();
         type Config = RangeCheckConfig<F, RANGE, LOOKUP_RANGE>;
         type FloorPlanner = V1;
 
@@ -791,7 +845,7 @@ mod tests {
         let proof: Vec<u8> = transcript.finalize();
 
         let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
-        let v_acc = VerifierAccumulator::new(&pk, &[],&mut v_transcript).unwrap();
+        let v_acc = VerifierAccumulator::new(&pk, &[], &mut v_transcript).unwrap();
 
         check_v_and_p_transcripts(v_acc, p_acc);
     }
@@ -826,8 +880,9 @@ mod tests {
         let proof: Vec<u8> = transcript.finalize();
 
         let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
-        let v_acc = VerifierAccumulator::new(&pk, &[],&mut v_transcript).unwrap();
-        let v_acc1 = VerifierAccumulator::fold(&pk, v_acc.clone(), v_acc.clone(), &mut v_transcript);
+        let v_acc = VerifierAccumulator::new(&pk, &[], &mut v_transcript).unwrap();
+        let v_acc1 =
+            VerifierAccumulator::fold(&pk, v_acc.clone(), v_acc.clone(), &mut v_transcript);
 
         check_v_and_p_transcripts(v_acc1, p_acc1);
     }
@@ -870,8 +925,8 @@ mod tests {
         let proof: Vec<u8> = transcript.finalize();
 
         let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
-        let v_acc0 = VerifierAccumulator::new(&pk, &[],&mut v_transcript).unwrap();
-        let v_acc1 = VerifierAccumulator::new(&pk, &[],&mut v_transcript).unwrap();
+        let v_acc0 = VerifierAccumulator::new(&pk, &[], &mut v_transcript).unwrap();
+        let v_acc1 = VerifierAccumulator::new(&pk, &[], &mut v_transcript).unwrap();
 
         // Check acc0 and v_acc0 transcripts
         check_v_and_p_transcripts(v_acc0, acc0);
@@ -919,9 +974,10 @@ mod tests {
         let proof: Vec<u8> = transcript.finalize();
         let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
 
-        let v_acc0 = VerifierAccumulator::new(&pk, &[],&mut v_transcript).unwrap();
-        let v_acc1 = VerifierAccumulator::new(&pk, &[],&mut v_transcript).unwrap();
-        let v_acc2 = VerifierAccumulator::fold(&pk, v_acc0.clone(), v_acc1.clone(), &mut v_transcript);
+        let v_acc0 = VerifierAccumulator::new(&pk, &[], &mut v_transcript).unwrap();
+        let v_acc1 = VerifierAccumulator::new(&pk, &[], &mut v_transcript).unwrap();
+        let v_acc2 =
+            VerifierAccumulator::fold(&pk, v_acc0.clone(), v_acc1.clone(), &mut v_transcript);
 
         check_v_and_p_transcripts(v_acc0, acc0);
         check_v_and_p_transcripts(v_acc1, acc1);
@@ -980,9 +1036,10 @@ mod tests {
         let proof: Vec<u8> = transcript.finalize();
         let mut v_transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
 
-        let v_acc0 = VerifierAccumulator::new(&pk, &[],&mut v_transcript).unwrap();
-        let v_acc1 = VerifierAccumulator::new(&pk, &[],&mut v_transcript).unwrap();
-        let v_acc2 = VerifierAccumulator::fold(&pk, v_acc0.clone(), v_acc1.clone(), &mut v_transcript);
+        let v_acc0 = VerifierAccumulator::new(&pk, &[], &mut v_transcript).unwrap();
+        let v_acc1 = VerifierAccumulator::new(&pk, &[], &mut v_transcript).unwrap();
+        let v_acc2 =
+            VerifierAccumulator::fold(&pk, v_acc0.clone(), v_acc1.clone(), &mut v_transcript);
 
         check_v_and_p_transcripts(v_acc0, acc0);
         check_v_and_p_transcripts(v_acc1, acc1);

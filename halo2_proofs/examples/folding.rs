@@ -9,7 +9,9 @@ use halo2_proofs::{
         accumulator::Accumulator,
         // decider::create_proof,
     },
-    transcript::{Blake2bWrite, Challenge255,  TranscriptWriterBuffer},
+    transcript::{
+        Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer,
+    },
 };
 use halo2curves::pasta::pallas;
 use rand_core::{OsRng, RngCore};
@@ -253,41 +255,64 @@ fn main() {
     let circuit1 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
     let circuit2 = MyCircuit::<pallas::Scalar, W, H>::rand(&mut rng);
 
-    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
     let pk = protostar::ProvingKey::new(&params, &circuit1).unwrap();
+    let (proof, p_acc) = {
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        let acc1 = protostar::prover::create_accumulator(
+            &params,
+            &pk,
+            &circuit1,
+            &[],
+            &mut rng,
+            &mut transcript,
+        )
+        .unwrap();
 
-    let acc1 = protostar::prover::create_accumulator(
-        &params,
-        &pk,
-        &circuit1,
-        &[],
-        &mut rng,
-        &mut transcript,
-    )
-    .unwrap();
+        let acc2 = protostar::prover::create_accumulator(
+            &params,
+            &pk,
+            &circuit2,
+            &[],
+            &mut rng,
+            &mut transcript,
+        )
+        .unwrap();
 
-    // An accumulator is always valid
-    assert!(Accumulator::decide(&params, &pk, &acc1));
+        // An accumulator is always valid
+        assert!(Accumulator::decide(&params, &pk, &acc1));
+        assert!(Accumulator::decide(&params, &pk, &acc2));
 
-    // Folding an accumulator with itself should yield the same one,
-    // since (1-X)*acc + X*acc = acc
-    let acc = Accumulator::fold(&pk, acc1.clone(), acc1.clone(), &mut transcript);
-    assert_eq!(acc, acc1);
+        // Folding an accumulator with itself should yield the same one,
+        // since (1-X)*acc + X*acc = acc
+        let acc = Accumulator::fold(&pk, acc1.clone(), acc1.clone(), &mut transcript);
+        assert_eq!(acc, acc1);
+        assert!(Accumulator::decide(&params, &pk, &acc));
 
-    assert!(Accumulator::decide(&params, &pk, &acc));
+        let acc = Accumulator::fold(&pk, acc, acc2, &mut transcript);
+        assert!(Accumulator::decide(&params, &pk, &acc));
+        (transcript.finalize(), acc)
+    };
+    // For now we use pk for the verifier
+    let vk = pk.clone();
+    let v_acc = {
+        let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+        let acc1 =
+            protostar::verifier::VerifierAccumulator::new(&vk, &[], &mut transcript).unwrap();
 
-    let acc2 = protostar::prover::create_accumulator(
-        &params,
-        &pk,
-        &circuit2,
-        &[],
-        &mut rng,
-        &mut transcript,
-    )
-    .unwrap();
+        let acc2 =
+            protostar::verifier::VerifierAccumulator::new(&vk, &[], &mut transcript).unwrap();
 
-    let acc = Accumulator::fold(&pk, acc, acc2, &mut transcript);
-    assert!(Accumulator::decide(&params, &pk, &acc));
+        // Folding an accumulator with itself should yield the same one,
+        // since (1-X)*acc + X*acc = acc
+        let acc = protostar::verifier::VerifierAccumulator::fold(
+            &vk,
+            acc1.clone(),
+            acc1.clone(),
+            &mut transcript,
+        );
+        assert_eq!(acc, acc1);
 
-    // let _ = create_proof::<_, ProverIPA<_>, _, _, _>(&params, &pk, acc, &mut rng, &mut transcript);
+        protostar::verifier::VerifierAccumulator::fold(&pk, acc, acc2, &mut transcript)
+    };
+    assert_eq!(v_acc, p_acc);
 }

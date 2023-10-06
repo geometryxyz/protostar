@@ -105,9 +105,9 @@ impl<C: CurveAffine> Accumulator<C> {
         /*
         Note: The verifier will have to check that e(0) = acc0.error and e(1) = acc1.error.
         We can instead send the quotient
-                e(X) - (1-t)e(0) - te(1)
+                e(X) - (1-X)e(0) - Xe(1)
         e'(X) = ------------------------
-                         (1-t)t
+                         (1-X)X
         and let the verifier compute
         e(α) = (1-α)α⋅e'(α) + (1-α)⋅e₀ + α⋅e₁
         */
