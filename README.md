@@ -355,6 +355,11 @@ This would allow the prover to adapt to varying circuit sizes.
 
 ### Conclusion
 
+We think there are two real-world situations where one might want to currently implement Protostar.
+We explain how they both would be implemented with significantly different approaches.
+
+#### Optimal performance
+
 Given the enormous amount of flexibility offered by Protostar, it is hard to imagine a single implementation supporting all possible configurations. 
 More importantly, whether or not to include these optimizations depends heavily on the circuit used.
 While it is always possible to estimate the impact the cost/benefit of including certain primitives, they come at a tradeoff over:
@@ -380,10 +385,52 @@ With a concrete circuit to optimize for,
 a specific application of these could be considered if there is a clear need to improve on current performance. 
 By building specific extensions with clear use cases, it would be easier to share them across circuits, 
 while allowing circuit developpers to only activate those relevant their application.
-From an engineering perspective, building these proof-system-level optimizations would be guided by benchmarks and profiling. 
+From an engineering perspective, building these proof-system-level optimizations would be guided by benchmarks and profiling.
 
 Optimal folding requires much more customization at the proof system level. 
 Implementing all permutations to accommodate all use case can lead to a system that is optimal for nobody.
+Therefore, in case where performance is the critical to the application (VMs for example), 
+and where there is the option of designing the proof system for very specific circuits,
+it would make sense to build these abstraction on top of an exisiting simpler scheme.
+This type of development is closer to STARKs, where each VM team has built their own prover stacks which are tailored exactly to their computation model. 
+
+
+#### Backwards compatibility 
+
+We cannot ignore the fact that many circuits today are already written in halo2, and there would be a huge cost associated to rewriting it all in Nova and then figuring out how each optimization would fit it. 
+Moreover, there are several existing circuits (for example zkEVM) for which folding would improve performance.
+
+Our implement focused on **full** backwards compatibility with the halo2 API, but this proved to limit the optimizations that could be applied from the paper.
+We suggest some small (but potentially breaking) changes that could be applied to the existing API to make folding more efficient:
+- Forcing every `Gate` to have a queryable binary `Selector` ensuring only active gates are evaluated during folding. 
+  - These should be treated separately from the `Expression` they select, though they can be treated as `Fixed` columns by the decider and re-multiplied at that point.
+- Consider implementing a new `Layouter` which would focus on:
+  - Limiting the number of columns sent by the prover.
+  - Merging multiple fixed table columns into a single one.
+- Allowing variable-sized and sparse columns could speed up commitment time.
+  - Remove all padding requirements.
+  - Enabling support for `sqrt(n)` compressed-verifier strategy.
+  - Lower memory requirements for `Instance` columns.
+- Specifying the power of a challenge inside an expression to prevent degree blow-up. 
+- Build up more lookup primitives based on logUp. 
+  - Distinguish fixed and online lookups to apply different proving strategies. 
+  - Shuffles using fixed multiplicities columns.
+- Augmenting the `Circuit` API to support IVC would 
+
+Note that not all the above points are required, though some of them may necessitate larger architectural changes that would be break compatibility with exisiting circuits. 
+These types of changes should be discussed by different members of the community to ensure compatibility across different projects. 
+
+
+Moreover, a Sumcheck prover seems like a better choice for implementing the decider, due to its similarity with the folding prover.
+A Sumcheck-based prover would be useful on it's own without folding,
+as it would enable faster proving of standalone circuits as well.
+- The lack of degree bound in Sumcheck decouples the need to fit this specific requirement inside of the `ConstraintSystem` and provides more flexibility in terms of gate design. 
+- Native Sumchecks required for logUp do not require commitments to "running product/sum columns", whose computation is inherently sequential. 
+- Selector optimizations can still be applied as long as gates of the same type are adjacent. 
+
+
+Overall, a generic implementation of Protostar which takes advantage of the many optimizations available in folding will require changes to the way circuits are defined, and a large rewrite of most of the proof system. 
+This will require coordination between different groups and members of the community and to take into account the requirements of each project.
 
 ## Minimum Supported Rust Version
 
