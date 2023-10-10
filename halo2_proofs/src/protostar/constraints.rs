@@ -16,7 +16,7 @@ pub(crate) mod expression;
 pub(crate) mod paired;
 pub(crate) mod polynomial;
 
-/// Used to store references of the variables referenced by an expression. 
+/// Used to store references of the variables referenced by an expression.
 /// TODO: Merge with Verifier and Prover accumulator
 pub struct Data<T: QueryType> {
     fixed: Vec<T::Fixed>,

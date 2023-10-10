@@ -94,7 +94,7 @@ impl<C: CurveAffine> Accumulator<C> {
             let mut error_poly_vanish = error_poly.clone();
             // subtract (1-t)e0 + te1 = e0 + t(e1-e0)
             error_poly_vanish[0] -= error0;
-            error_poly_vanish[1] -= error1-error0;
+            error_poly_vanish[1] -= error1 - error0;
             quotient_by_boolean_vanishing(&error_poly_vanish)
         };
 
